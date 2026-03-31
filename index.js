@@ -1,37 +1,36 @@
 const express = require('express');
 const axios = require('axios');
 const app = express();
-
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
 const FONNTE_TOKEN = process.env.FONNTE_TOKEN;
+const GEMINI_KEY = process.env.GEMINI_API_KEY;
 
 app.post('/webhook', async (req, res) => {
-    // Ambil data dari Fonnte
     const { sender, message } = req.body;
-    
-    console.log(`[MASUK] Chat dari: ${sender} | Isi: ${message}`);
+    console.log(`[LOG] Ada chat masuk dari ${sender}: ${message}`);
 
     try {
-        // Balas langsung TANPA Gemini
-        const response = await axios.post('https://api.fonnte.com/send', {
-            target: sender,
-            message: `Lapor Bos Gigs! Sistem ngebaca lo ngetik: "${message}"`
+        // 1. Tanya Gemini
+        const ai = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`, {
+            contents: [{ parts: [{ text: message }] }]
+        });
+        const jawaban = ai.data.candidates[0].content.parts[0].text;
+
+        // 2. Balas ke Fonnte (Gue perbaiki formatnya di sini)
+        const kirim = await axios.post('https://api.fonnte.com/send', {
+            target: sender.replace('@s.whatsapp.net', ''), // Bersihin format nomor
+            message: jawaban
         }, {
-            headers: { 
-                'Authorization': FONNTE_TOKEN.trim() 
-            }
+            headers: { 'Authorization': FONNTE_TOKEN.trim() }
         });
 
-        console.log(`[SUKSES] Status Fonnte:`, response.data);
+        console.log(`[SUKSES] Fonnte bilang: ${JSON.stringify(kirim.data)}`);
         res.status(200).send('OK');
-
-    } catch (error) {
-        console.error(`[GAGAL BALES] Error dari Fonnte:`, error.response ? error.response.data : error.message);
+    } catch (err) {
+        console.error(`[ERROR]`, err.response ? err.response.data : err.message);
         res.status(500).send('Error');
     }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`=== TES GEMA STANDBY DI PORT ${PORT} ===`));
+app.listen(process.env.PORT || 3000, () => console.log('JARVIS AKTIF!'));
