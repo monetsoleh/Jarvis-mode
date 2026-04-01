@@ -10,30 +10,27 @@ const FONNTE_TOKEN = process.env.FONNTE_TOKEN;
 app.post('/webhook', async (req, res) => {
     res.status(200).send('OK');
 
-    // ====== DEBUG LOG (hapus setelah bot jalan normal) ======
     console.log('[WEBHOOK RAW]', JSON.stringify(req.body));
 
     const { sender, message, device, name } = req.body;
 
-    // 1. Anti-Loop: Jangan balas chat dari bot sendiri
+    // Anti-Loop: Jangan balas chat dari bot sendiri
     if (!message || name === 'Corpomind') return;
 
-    // --- FIX #1: Normalisasi format nomor dari Fonnte ---
-    // Fonnte kadang kirim format "628xxx@s.whatsapp.net", kita strip suffix-nya
+    // Normalisasi format nomor dari Fonnte
     const normalize = (num) => {
         if (!num) return num;
         return num.replace('@s.whatsapp.net', '').replace('@g.us', '').trim();
     };
 
-    const deviceKey = normalize(device);   // key untuk cari config
-    const senderKey = normalize(sender);   // nomor pengirim bersih
+    const deviceKey = normalize(device);
+    const senderKey = normalize(sender);
 
-    console.log(`[INFO] device="${device}" → deviceKey="${deviceKey}" | sender="${sender}" → senderKey="${senderKey}"`);
+    console.log(`[INFO] deviceKey="${deviceKey}" | senderKey="${senderKey}"`);
 
     try {
-        // 2. Baca Database Pembeli (users.json)
         const userData = JSON.parse(fs.readFileSync('./users.json', 'utf8'));
-        const config = userData[deviceKey]; // Ambil config berdasarkan nomor bot
+        const config = userData[deviceKey];
 
         if (!config || !config.sheet) {
             console.log(`[ALERT] Nomor bot "${deviceKey}" belum terdaftar di users.json`);
@@ -41,40 +38,48 @@ app.post('/webhook', async (req, res) => {
             return;
         }
 
-        // 3. Ambil data dari Google Sheets pembeli tersebut
         const sheetRes = await axios.get(config.sheet);
         const dataBisnis = JSON.stringify(sheetRes.data);
 
-        // 4. Logika Admin & Prompt Jarvis
-        // --- FIX #2: Bandingkan nomor yang sudah dinormalisasi ---
         const isAdmin = senderKey === config.admin || senderKey.includes(config.admin);
 
-        let roleInstruction = isAdmin
-            ? "PERAN: Asisten Pribadi Elit. Buka semua data (modal/gaji) karena ini Bos Gigs."
-            : "PERAN: Customer Service. Rahasiakan modal/gaji. Fokus ke stok dan harga jual.";
+        const roleInstruction = isAdmin
+            ? "AKSES: ADMIN (pemilik bisnis). Tampilkan semua data termasuk modal dan gaji."
+            : "AKSES: CUSTOMER. Rahasiakan data modal dan gaji. Hanya tampilkan stok dan harga jual.";
 
-        const systemPrompt = `
-        Anda adalah "Jarvis" (atau "Corpomind"), asisten AI elit milik "Bos Gigs".
-        
-        # GAYA BAHASA:
-        - Jika disapa (Woi, Jing, P, Jarvis, dll): Balas dengan sangat sopan: "Siap Bos Gigs! Jarvis siap melayani. Ada perintah atau data yang mau dicek? 🫡"
-        - Selalu panggil "Bos" atau "Bos Gigs".
-        
-        # FORMAT DATA:
-        - Jika Bos tanya stok/data: Langsung tampilkan datanya dengan RAPI.
-        - Gunakan Emoji (📦, 📊, ✅, ⚠️).
-        - Gunakan Garis Pembatas (-------------------------).
-        - Gunakan BOLD (*) untuk poin penting.
-        
-        # DATA SPREADSHEET:
-        ${dataBisnis}
-        
-        # TINGKAT AKSES:
-        ${roleInstruction}
-        
-        # PERTANYAAN:
-        "${message}"
-        `;
+        const systemPrompt = `Anda adalah "Jarvis", asisten AI bisnis. Panggil pengguna cukup dengan "Bos".
+
+# ATURAN FORMAT PESAN — WAJIB DIIKUTI:
+Pesan ini dikirim lewat WhatsApp. DILARANG menggunakan format tabel markdown (format | kolom | kolom | akan tampil acak-acakan di WhatsApp).
+
+Gunakan format daftar seperti contoh berikut untuk menampilkan data:
+
+──────────────────
+📦 *Kain Jeans Denim*
+   Kategori  : Bahan Baku
+   Stok Sisa : 75 Roll
+   Harga Jual: Rp 1.500.000
+   Lokasi    : Gudang A
+──────────────────
+
+Aturan tambahan:
+- Gunakan *teks* untuk cetak tebal
+- Gunakan emoji yang sesuai (📦 ✅ ⚠️ 📊 💰)
+- Pisahkan setiap item dengan garis ──────────────────
+- Jangan gunakan bullet *, -, atau numbering di awal baris data
+- Jawaban harus singkat, jelas, dan mudah dibaca di layar HP
+
+# GAYA BAHASA:
+- Sapaan: "Siap Bos! 🫡"
+- Sopan, ringkas, dan to the point
+
+# DATA SPREADSHEET:
+${dataBisnis}
+
+# ${roleInstruction}
+
+# PERTANYAAN DARI PENGGUNA:
+"${message}"`;
 
         const aiResponse = await axios.post(
             `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
@@ -83,7 +88,6 @@ app.post('/webhook', async (req, res) => {
 
         const jawaban = aiResponse.data.candidates[0].content.parts[0].text;
 
-        // 5. Kirim ke WhatsApp via Fonnte
         await axios.post('https://api.fonnte.com/send', {
             target: senderKey,
             message: jawaban
@@ -101,7 +105,6 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
-// Endpoint health check (opsional, berguna di Railway)
 app.get('/', (req, res) => res.send('Jarvis Bot LIVE ✅'));
 
 const PORT = process.env.PORT || 3000;
