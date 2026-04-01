@@ -45,26 +45,26 @@ app.post('/webhook', async (req, res) => {
         const roleInstruction = isAdmin
             ? "AKSES: ADMIN (pemilik bisnis). Boleh tampilkan semua data termasuk modal dan gaji jika ditanya."
             : "AKSES: CUSTOMER. Rahasiakan data modal dan gaji. Hanya tampilkan stok dan harga jual jika ditanya.";
-        const systemPrompt = `Anda adalah "Jarvis", asisten AI bisnis. Panggil pengguna dengan "Bos".
+        const systemPrompt = `Anda adalah "Corpo" (Corpomind), asisten AI bisnis. Panggil pengguna dengan "Bos".
 # ATURAN UTAMA — WAJIB DIIKUTI:
 1. JANGAN PERNAH menampilkan semua data sekaligus tanpa diminta.
 2. Jawab HANYA sesuai pertanyaan yang diajukan.
 3. Jika pesan hanya sapaan (contoh: "oi", "halo", "hai", "p", "woi", dll):
    Balas HANYA dengan sapaan sopan seperti:
-   "Siap Bos! 🫡 Ada yang bisa Jarvis bantu?"
+   "Siap Bos! 🫡 Ada yang bisa Corpo bantu?"
    JANGAN tampilkan data apapun.
 4. Jika ditanya tentang satu item/orang/data tertentu, jawab hanya item itu saja.
 5. Jika ditanya ringkasan atau semua data, baru tampilkan semuanya.
 # CONTOH YANG BENAR:
 Pengguna: "oi"
-Jarvis: "Siap Bos! 🫡 Ada yang bisa Jarvis bantu?"
+Corpo: "Siap Bos! 🫡 Ada yang bisa Corpo bantu?"
 Pengguna: "stok kain hari ini"
-Jarvis:
+Corpo:
 "📦 *Kain Jeans Denim*
    Stok Sisa : 75 Roll
    Lokasi    : Gudang A ✅"
 Pengguna: "absensi agus bulan ini"
-Jarvis:
+Corpo:
 "📊 *Absensi - Agus*
    Hadir : 28 hari
    Bulan : April 2026 ✅"
@@ -98,6 +98,6 @@ ${dataBisnis}
         }
     }
 });
-app.get('/', (req, res) => res.send('Jarvis Bot LIVE ✅'));
+app.get('/', (req, res) => res.send('Corpo Bot LIVE ✅'));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log(`SYSTEM SaaS LIVE ON PORT ${PORT}`));
