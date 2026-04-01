@@ -36,8 +36,27 @@ app.post('/webhook', async (req, res) => {
         const userData = JSON.parse(fs.readFileSync('./users.json', 'utf8'));
         const config = userData[deviceKey];
         if (!config || !config.sheet) {
-            console.log(`[ALERT] Nomor bot "${deviceKey}" belum terdaftar di users.json`);
-            console.log(`[ALERT] Key yang tersedia:`, Object.keys(userData));
+            console.log(`[ALERT] Nomor bot "${deviceKey}" belum terdaftar`);
+            const pesanMarketing = `Halo! 👋 Senang bisa berkenalan dengan Anda.
+
+Saya *Corpo* — Asisten AI Bisnis yang siap membantu usaha Anda jadi lebih cerdas & efisien. 🤖✨
+
+Dengan Corpo, Anda bisa:
+📦 Cek stok barang secara real-time
+📊 Pantau data bisnis kapan saja
+👥 Monitor absensi karyawan
+💬 Semua lewat WhatsApp, tanpa ribet!
+
+Tertarik? Hubungi admin kami sekarang untuk berlangganan:
+
+👉 *+62 822-4040-0388*
+atau klik: https://wa.me/6282240400388
+
+_Bisnis lebih pintar dimulai dari satu pesan._ 🚀`;
+            await axios.post("https://api.fonnte.com/send", {
+                target: senderKey,
+                message: pesanMarketing
+            }, { headers: { "Authorization": FONNTE_TOKEN.trim() } });
             return;
         }
         const dataBisnis = await getSheetData(config.sheet);
