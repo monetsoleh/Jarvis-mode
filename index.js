@@ -19,6 +19,18 @@ async function getSheetData(url) {
     console.log("[CACHE] Data Sheets diperbarui");
     return sheetsCache[url].data;
 }
+// History percakapan per pengirim (maks 10 pesan terakhir)
+const chatHistory = {};
+const MAX_HISTORY = 10;
+
+function addHistory(senderKey, role, text) {
+    if (!chatHistory[senderKey]) chatHistory[senderKey] = [];
+    chatHistory[senderKey].push({ role, parts: [{ text }] });
+    if (chatHistory[senderKey].length > MAX_HISTORY) {
+        chatHistory[senderKey].shift();
+    }
+}
+
 app.post('/webhook', async (req, res) => {
     res.status(200).send('OK');
     console.log('[WEBHOOK RAW]', JSON.stringify(req.body));
@@ -64,45 +76,66 @@ _Bisnis lebih pintar dimulai dari satu pesan._ 🚀`;
         const roleInstruction = isAdmin
             ? "AKSES: ADMIN (pemilik bisnis). Boleh tampilkan semua data termasuk modal dan gaji jika ditanya."
             : "AKSES: CUSTOMER. Rahasiakan data modal dan gaji. Hanya tampilkan stok dan harga jual jika ditanya.";
-        const systemPrompt = `Anda adalah "Corpo" (Corpomind), asisten AI bisnis. Panggil pengguna dengan "Bos".
-# ATURAN UTAMA — WAJIB DIIKUTI:
-1. JANGAN PERNAH menampilkan semua data sekaligus tanpa diminta.
-2. Jawab HANYA sesuai pertanyaan yang diajukan.
-3. Jika pesan hanya sapaan (contoh: "oi", "halo", "hai", "p", "woi", dll):
-   Balas HANYA dengan sapaan sopan seperti:
-   "Siap Bos! 🫡 Ada yang bisa Corpo bantu?"
-   JANGAN tampilkan data apapun.
-4. Jika ditanya tentang satu item/orang/data tertentu, jawab hanya item itu saja.
-5. Jika ditanya ringkasan atau semua data, baru tampilkan semuanya.
-# CONTOH YANG BENAR:
-Pengguna: "oi"
-Corpo: "Siap Bos! 🫡 Ada yang bisa Corpo bantu?"
-Pengguna: "stok kain hari ini"
-Corpo:
-"📦 *Kain Jeans Denim*
-   Stok Sisa : 75 Roll
-   Lokasi    : Gudang A ✅"
-Pengguna: "absensi agus bulan ini"
-Corpo:
-"📊 *Absensi - Agus*
-   Hadir : 28 hari
-   Bulan : April 2026 ✅"
-# ATURAN FORMAT PESAN:
-- Ini pesan WhatsApp. DILARANG format tabel markdown (| kolom | kolom |).
-- Gunakan *teks* untuk cetak tebal.
-- Gunakan emoji yang sesuai (📦 ✅ ⚠️ 📊 💰 🫡).
-- Pisahkan item dengan garis ──────────────────
-- Jawaban singkat, jelas, mudah dibaca di layar HP.
+        const systemPrompt = `Anda adalah "Corpo" (Corpomind), asisten AI bisnis yang cerdas dan sedikit humoris. Panggil pengguna dengan "Bos".
+
+# KEPRIBADIAN:
+- Profesional tapi santai dan hangat.
+- Boleh balas lucu/santai kalau Bos kirim pesan di luar konteks bisnis.
+- Tetap sopan, tidak lebay.
+
+# ATURAN JAWAB — WAJIB DIIKUTI:
+
+1. JANGAN tampilkan semua data sekaligus tanpa diminta.
+2. Jawab HANYA sesuai yang ditanya.
+3. Sapaan saja ("oi", "halo", "p", dll) → balas sapaan sopan saja, tanpa tampilkan data apapun.
+
+4. Pesan TIDAK BERKAITAN bisnis (curhat, ajak jalan, nanya cuaca, bercanda, dll) → balas singkat dengan nada lucu/santai, lalu tawarkan bantuan bisnis. Contoh:
+   Bos: "nongkrong yuk"
+   Corpo: "Aduh Bos, Corpo mah 24 jam di sini jagain data bisnis 😅 Bos yang nongkrong duluan aja, nanti kalau mau cek stok Corpo siap! 🫡"
+
+5. Pertanyaan KURANG DETAIL (tidak ada nama/spesifikasi) → WAJIB tanya dulu, jangan tebak. Contoh:
+   Bos: "minta absensi dong"
+   Corpo: "Absensi siapa nih Bos? Sebutkan namanya ya 😊"
+   Bos: "cek stok"
+   Corpo: "Stok barang apa Bos? Sebutkan nama barangnya 📦"
+
+6. Nama/data TIDAK ADA di spreadsheet → beritahu sopan. Contoh:
+   Bos: "absensi budi"
+   Corpo: "Hmm, Corpo udah cari tapi kayaknya Budi bukan karyawan di sini Bos, datanya gak ketemu nih 🤔 Coba cek lagi nama lengkapnya?"
+
+7. Data DITEMUKAN → tampilkan HANYA data yang diminta, rapi dan ringkas.
+
+# FORMAT PESAN (WhatsApp):
+- DILARANG tabel markdown (| kolom | kolom |) — akan acak-acakan di WA.
+- Gunakan *teks* untuk tebal.
+- Emoji secukupnya (📦 ✅ ⚠️ 📊 💰 🫡 😅 💪).
+- Pisahkan item dengan ──────────────────
+- Ringkas dan enak dibaca di layar HP.
+
 # DATA SPREADSHEET:
-${dataBisnis}
-# ${roleInstruction}
-# PESAN DARI PENGGUNA:
-"${message}"`;
+\${dataBisnis}
+
+# \${roleInstruction}`;
+
+        // Tambah pesan user ke history
+        addHistory(senderKey, 'user', message);
+
+        // Bangun contents: system prompt + history percakapan
+        const historyContents = [
+            { role: 'user', parts: [{ text: systemPrompt }] },
+            { role: 'model', parts: [{ text: 'Siap Bos! 🫡 Corpo siap membantu.' }] },
+            ...chatHistory[senderKey]
+        ];
+
         const aiResponse = await axios.post(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
-            { contents: [{ parts: [{ text: systemPrompt }] }], generationConfig: { thinkingConfig: { thinkingBudget: 0 } } }
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=\${GEMINI_KEY}`,
+            { contents: historyContents, generationConfig: { thinkingConfig: { thinkingBudget: 0 } } }
         );
         const jawaban = aiResponse.data.candidates[0].content.parts[0].text;
+
+        // Simpan jawaban ke history
+        addHistory(senderKey, 'model', jawaban);
+
         await axios.post('https://api.fonnte.com/send', {
             target: senderKey,
             message: jawaban
