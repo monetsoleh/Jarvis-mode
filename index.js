@@ -1,63 +1,63 @@
 const express = require('express');
 const axios = require('axios');
+const fs = require('fs');
 const app = express();
-
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const FONNTE_TOKEN = process.env.FONNTE_TOKEN;
 
-// 1. Cek Status di Browser
-app.get('/', (req, res) => {
-    res.send('JARVIS 2.5 FLASH ONLINE!');
-});
-
-// 2. Webhook Utama
 app.post('/webhook', async (req, res) => {
-    // Balas 'OK' instan ke Fonnte supaya tidak ada pengiriman ulang (retry)
     res.status(200).send('OK');
+    const { sender, message, device, name } = req.body;
 
-    const { sender, message, name } = req.body;
-
-    // Filter agar tidak memproses pesan kosong atau pesan dari bot sendiri (Anti-Loop)
-    if (!message || name === 'Corpomind') {
-        return;
-    }
-
-    console.log(`[MASUK] Dari: ${sender} | Pesan: ${message}`);
+    // 1. Anti-Loop: Jangan balas chat dari bot sendiri
+    if (!message || name === 'Corpomind') return;
 
     try {
-        // A. Panggil API Gemini 2.5 Flash
+        // 2. Baca Database Pembeli (users.json)
+        const userData = JSON.parse(fs.readFileSync('./users.json', 'utf8'));
+        const userSheetUrl = userData[device]; // 'device' adalah nomor bot penerima
+
+        if (!userSheetUrl) {
+            console.log(`[ALERT] Nomor ${device} belum terdaftar di users.json`);
+            return;
+        }
+
+        // 3. Ambil data dari Google Sheets pembeli tersebut
+        const sheetRes = await axios.get(userSheetUrl);
+        const dataBisnis = JSON.stringify(sheetRes.data);
+
+        // 4. Prompt Gemini (Logika Sales & Admin)
+        const isAdmin = sender.includes("6282240400388"); // Ganti nomor lo
+        let instruksi = `Data Bisnis: ${dataBisnis}. User bertanya: "${message}". `;
+        
+        if (isAdmin) {
+            instruksi += "Jawab sebagai asisten pribadi yang jujur dan detail (tampilkan modal/gaji).";
+        } else {
+            instruksi += "Jawab sebagai Customer Service yang ramah. JANGAN kasih tahu harga modal/gaji. Fokus ke harga jual dan stok.";
+        }
+
         const aiResponse = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`, {
-            contents: [{ 
-                parts: [{ 
-                    text: `Kamu adalah Jarvis, asisten pribadi Bos Gigs yang cerdas dan asik. Jawab ini: ${message}` 
-                }] 
-            }]
+            contents: [{ parts: [{ text: instruksi }] }]
         });
 
-        const jawabanJarvis = aiResponse.data.candidates[0].content.parts[0].text;
-        console.log(`[JARVIS 2.5] Menjawab: ${jawabanJarvis}`);
+        const jawaban = aiResponse.data.candidates[0].content.parts[0].text;
 
-        // B. Kirim Balik ke WA via Fonnte
+        // 5. Kirim ke WhatsApp via Fonnte
         await axios.post('https://api.fonnte.com/send', {
             target: sender.replace('@s.whatsapp.net', '').replace('@g.us', ''),
-            message: jawabanJarvis
+            message: jawaban
         }, {
             headers: { 'Authorization': FONNTE_TOKEN.trim() }
         });
 
-        console.log(`[SUKSES] Pesan terkirim ke WhatsApp.`);
+        console.log(`[SUKSES] Pesan dari ${sender} diproses menggunakan data dari ${device}`);
 
     } catch (error) {
-        // Log error jika API Gemini atau Fonnte bermasalah
-        console.error(`[ERROR]`, error.response ? error.response.data : error.message);
+        console.error("[ERROR]", error.message);
     }
 });
 
-// 3. Konfigurasi Port Railway
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`=== JARVIS 2.5 FLASH STANDBY DI PORT ${PORT} ===`);
-});
+app.listen(PORT, '0.0.0.0', () => console.log(`SYSTEM SaaS LIVE ON PORT ${PORT}`));
