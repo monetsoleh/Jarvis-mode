@@ -10,56 +10,54 @@ const FONNTE_TOKEN = process.env.FONNTE_TOKEN;
 
 // 1. Cek Status di Browser
 app.get('/', (req, res) => {
-    res.send('JARVIS FULL SYSTEM ONLINE & ANTI-SPAM!');
+    res.send('JARVIS 2.5 FLASH ONLINE!');
 });
 
 // 2. Webhook Utama
 app.post('/webhook', async (req, res) => {
-    // LANGSUNG respon OK ke Fonnte biar gak dikirim ulang (Anti-Pending/Retry)
+    // Balas 'OK' instan ke Fonnte supaya tidak ada pengiriman ulang (retry)
     res.status(200).send('OK');
 
     const { sender, message, name } = req.body;
 
-    // FILTER: Jangan proses kalau pesan kosong atau dari diri sendiri (Corpomind)
+    // Filter agar tidak memproses pesan kosong atau pesan dari bot sendiri (Anti-Loop)
     if (!message || name === 'Corpomind') {
         return;
     }
 
-    console.log(`[MASUK] Dari: ${sender} (${name}) | Pesan: ${message}`);
+    console.log(`[MASUK] Dari: ${sender} | Pesan: ${message}`);
 
     try {
-        // A. Tanya Gemini (Versi 1.5 Flash biar stabil)
-        const aiResponse = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`, {
+        // A. Panggil API Gemini 2.5 Flash
+        const aiResponse = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`, {
             contents: [{ 
                 parts: [{ 
-                    text: `Kamu adalah Jarvis, asisten pribadi Bos Gigs. Jawab pesan ini secara singkat, asik, dan membantu: ${message}` 
+                    text: `Kamu adalah Jarvis, asisten pribadi Bos Gigs yang cerdas dan asik. Jawab ini: ${message}` 
                 }] 
             }]
         });
 
         const jawabanJarvis = aiResponse.data.candidates[0].content.parts[0].text;
-        console.log(`[JARVIS] Menjawab: ${jawabanJarvis}`);
+        console.log(`[JARVIS 2.5] Menjawab: ${jawabanJarvis}`);
 
         // B. Kirim Balik ke WA via Fonnte
-        const config = {
-            headers: { 'Authorization': FONNTE_TOKEN.trim() }
-        };
-
-        const payload = {
+        await axios.post('https://api.fonnte.com/send', {
             target: sender.replace('@s.whatsapp.net', '').replace('@g.us', ''),
             message: jawabanJarvis
-        };
+        }, {
+            headers: { 'Authorization': FONNTE_TOKEN.trim() }
+        });
 
-        const fonnteRes = await axios.post('https://api.fonnte.com/send', payload, config);
-        console.log(`[SUKSES] Status Fonnte:`, fonnteRes.data.status);
+        console.log(`[SUKSES] Pesan terkirim ke WhatsApp.`);
 
     } catch (error) {
+        // Log error jika API Gemini atau Fonnte bermasalah
         console.error(`[ERROR]`, error.response ? error.response.data : error.message);
     }
 });
 
-// 3. Port Railway (0.0.0.0 itu wajib)
+// 3. Konfigurasi Port Railway
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`=== JARVIS ONLINE DI PORT ${PORT} ===`);
+    console.log(`=== JARVIS 2.5 FLASH STANDBY DI PORT ${PORT} ===`);
 });
