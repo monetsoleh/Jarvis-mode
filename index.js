@@ -3,7 +3,7 @@ const axios = require('axios');
 const fs = require('fs');
 const app = express();
 app.use(express.json());
-const GEMINI_KEY = (process.env.GEMINI_API_KEY || "").trim();
+const GROQ_KEY = (process.env.GROQ_API_KEY || "").trim();
 const FONNTE_TOKEN = process.env.FONNTE_TOKEN;
 // Cache Google Sheets — refresh setiap 5 menit
 const sheetsCache = {};
@@ -117,24 +117,34 @@ _Bisnis lebih pintar dimulai dari satu pesan._ 🚀`;
 
 # \${roleInstruction}`;
 
+
         // Tambah pesan user ke history
         addHistory(senderKey, 'user', message);
 
-        // Bangun contents: system prompt + history percakapan
-        const historyContents = [
-            { role: 'user', parts: [{ text: systemPrompt }] },
-            { role: 'model', parts: [{ text: 'Siap Bos! 🫡 Corpo siap membantu.' }] },
-            ...chatHistory[senderKey]
+        // Bangun messages format OpenAI/Groq
+        const messages = [
+            { role: 'system', content: systemPrompt },
+            ...chatHistory[senderKey].map(m => ({
+                role: m.role === 'model' ? 'assistant' : m.role,
+                content: m.parts[0].text
+            }))
         ];
 
         const aiResponse = await axios.post(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=\${GEMINI_KEY}`,
-            { contents: historyContents, generationConfig: { thinkingConfig: { thinkingBudget: 0 } } }
+            'https://api.groq.com/openai/v1/chat/completions',
+            {
+                model: 'llama-3.3-70b-versatile',
+                messages: messages,
+                max_tokens: 1024,
+                temperature: 0.7
+            },
+            { headers: { 'Authorization': `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' } }
         );
-        const jawaban = aiResponse.data.candidates[0].content.parts[0].text;
+        const jawaban = aiResponse.data.choices[0].message.content;
 
-        // Simpan jawaban ke history
-        addHistory(senderKey, 'model', jawaban);
+        // Simpan jawaban bot ke history
+        addHistory(senderKey, 'assistant', jawaban);
+
 
         await axios.post('https://api.fonnte.com/send', {
             target: senderKey,
