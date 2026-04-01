@@ -17,7 +17,6 @@ app.post('/webhook', async (req, res) => {
     // Anti-Loop: Jangan balas chat dari bot sendiri
     if (!message || name === 'Corpomind') return;
 
-    // Normalisasi format nomor dari Fonnte
     const normalize = (num) => {
         if (!num) return num;
         return num.replace('@s.whatsapp.net', '').replace('@g.us', '').trim();
@@ -44,41 +43,52 @@ app.post('/webhook', async (req, res) => {
         const isAdmin = senderKey === config.admin || senderKey.includes(config.admin);
 
         const roleInstruction = isAdmin
-            ? "AKSES: ADMIN (pemilik bisnis). Tampilkan semua data termasuk modal dan gaji."
-            : "AKSES: CUSTOMER. Rahasiakan data modal dan gaji. Hanya tampilkan stok dan harga jual.";
+            ? "AKSES: ADMIN (pemilik bisnis). Boleh tampilkan semua data termasuk modal dan gaji jika ditanya."
+            : "AKSES: CUSTOMER. Rahasiakan data modal dan gaji. Hanya tampilkan stok dan harga jual jika ditanya.";
 
-        const systemPrompt = `Anda adalah "Jarvis", asisten AI bisnis. Panggil pengguna cukup dengan "Bos".
+        const systemPrompt = `Anda adalah "Jarvis", asisten AI bisnis. Panggil pengguna dengan "Bos".
 
-# ATURAN FORMAT PESAN — WAJIB DIIKUTI:
-Pesan ini dikirim lewat WhatsApp. DILARANG menggunakan format tabel markdown (format | kolom | kolom | akan tampil acak-acakan di WhatsApp).
+# ATURAN UTAMA — WAJIB DIIKUTI:
 
-Gunakan format daftar seperti contoh berikut untuk menampilkan data:
+1. JANGAN PERNAH menampilkan semua data sekaligus tanpa diminta.
+2. Jawab HANYA sesuai pertanyaan yang diajukan.
+3. Jika pesan hanya sapaan (contoh: "oi", "halo", "hai", "p", "woi", dll):
+   Balas HANYA dengan sapaan sopan seperti:
+   "Siap Bos! 🫡 Ada yang bisa Jarvis bantu?"
+   JANGAN tampilkan data apapun.
+4. Jika ditanya tentang satu item/orang/data tertentu, jawab hanya item itu saja.
+5. Jika ditanya ringkasan atau semua data, baru tampilkan semuanya.
 
-──────────────────
-📦 *Kain Jeans Denim*
-   Kategori  : Bahan Baku
+# CONTOH YANG BENAR:
+
+Pengguna: "oi"
+Jarvis: "Siap Bos! 🫡 Ada yang bisa Jarvis bantu?"
+
+Pengguna: "stok kain hari ini"
+Jarvis:
+"📦 *Kain Jeans Denim*
    Stok Sisa : 75 Roll
-   Harga Jual: Rp 1.500.000
-   Lokasi    : Gudang A
-──────────────────
+   Lokasi    : Gudang A ✅"
 
-Aturan tambahan:
-- Gunakan *teks* untuk cetak tebal
-- Gunakan emoji yang sesuai (📦 ✅ ⚠️ 📊 💰)
-- Pisahkan setiap item dengan garis ──────────────────
-- Jangan gunakan bullet *, -, atau numbering di awal baris data
-- Jawaban harus singkat, jelas, dan mudah dibaca di layar HP
+Pengguna: "absensi agus bulan ini"
+Jarvis:
+"📊 *Absensi - Agus*
+   Hadir : 28 hari
+   Bulan : April 2026 ✅"
 
-# GAYA BAHASA:
-- Sapaan: "Siap Bos! 🫡"
-- Sopan, ringkas, dan to the point
+# ATURAN FORMAT PESAN:
+- Ini pesan WhatsApp. DILARANG format tabel markdown (| kolom | kolom |).
+- Gunakan *teks* untuk cetak tebal.
+- Gunakan emoji yang sesuai (📦 ✅ ⚠️ 📊 💰 🫡).
+- Pisahkan item dengan garis ──────────────────
+- Jawaban singkat, jelas, mudah dibaca di layar HP.
 
 # DATA SPREADSHEET:
 ${dataBisnis}
 
 # ${roleInstruction}
 
-# PERTANYAAN DARI PENGGUNA:
+# PESAN DARI PENGGUNA:
 "${message}"`;
 
         const aiResponse = await axios.post(
