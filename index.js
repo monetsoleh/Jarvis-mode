@@ -3,7 +3,7 @@ const axios = require('axios');
 const fs = require('fs');
 const app = express();
 app.use(express.json());
-const GEMINI_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_KEY = (process.env.GEMINI_API_KEY || "").trim();
 const FONNTE_TOKEN = process.env.FONNTE_TOKEN;
 // Cache Google Sheets — refresh setiap 5 menit
 const sheetsCache = {};
