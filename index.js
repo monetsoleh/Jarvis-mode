@@ -65,22 +65,38 @@ function getIcon(namaSheet) {
 }
 
 // ─────────────────────────────────────────────
-//  Bangun teks menu dari daftar sheet
+//  Bangun teks menu — gaya campuran profesional
 // ─────────────────────────────────────────────
 function buildMenu(sheets, namaUser) {
     fallbackIndex = 0;
-    const baris = sheets.map((s, i) => `${i + 1}. ${getIcon(s)} ${s}`);
-    return `Halo${namaUser ? ' *' + namaUser + '*' : ''} 👋 Selamat datang!
+    const baris = sheets.map((s, i) => {
+        const icon = getIcon(s);
+        const nomor = String(i + 1).padStart(2, ' ');
+        return `┃ ${nomor}. ${icon}  ${s}`;
+    });
 
-Saya *Corpo* — Asisten AI Bisnis Anda 🤖
+    return `╔══════════════════════╗
+║   🤖  *C O R P O*   ║
+║  Asisten AI Bisnis   ║
+╚══════════════════════╝
 
-Pilih menu yang ingin Anda akses:
+Halo${namaUser ? ', *' + namaUser + '*' : ''} 👋
 
+Selamat datang! Saya siap membantu bisnis Anda hari ini 💼✨
+
+*📋 MENU UTAMA*
+┌──────────────────────
 ${baris.join('\n')}
+└──────────────────────
 
-──────────────────
-💬 Ketik *angka* untuk pilih menu, atau langsung tanya apa yang Anda butuhkan!
-_Contoh: "1" untuk ${sheets[0] || 'menu pertama'}_`;
+💡 *Cara pakai:*
+   Ketik *angka* untuk pilih menu
+   atau langsung tanya ke saya!
+
+_Contoh: ketik *"1"* untuk ${sheets[0] || 'menu pertama'}_
+
+━━━━━━━━━━━━━━━━━━━━━━
+🕐 Siap melayani 24 jam!`;
 }
 
 // ─────────────────────────────────────────────
@@ -181,22 +197,33 @@ app.post('/webhook', async (req, res) => {
         // ── Nomor belum terdaftar ──
         if (!config || !config.sheet) {
             console.log(`[ALERT] Nomor bot "${deviceKey}" belum terdaftar`);
-            const pesanMarketing = `Halo! 👋 Senang bisa berkenalan dengan Anda.
+            const pesanMarketing =
+`╔══════════════════════╗
+║   🤖  *C O R P O*   ║
+║  Asisten AI Bisnis   ║
+╚══════════════════════╝
 
-Saya *Corpo* — Asisten AI Bisnis yang siap membantu usaha Anda jadi lebih cerdas & efisien. 🤖✨
+Halo! 👋 Senang berkenalan dengan Anda!
 
-Dengan Corpo, Anda bisa:
-📦 Cek stok barang secara real-time
-📊 Pantau data bisnis kapan saja
-👥 Monitor absensi karyawan
-💬 Semua lewat WhatsApp, tanpa ribet!
+Saya *Corpo* — Asisten AI Bisnis yang siap membuat usaha Anda lebih *cerdas & efisien* 🚀
 
-Tertarik? Hubungi admin kami sekarang untuk berlangganan:
+*✨ Dengan Corpo, Anda bisa:*
+┌──────────────────────
+┃ 📦  Cek stok real-time
+┃ 📊  Pantau data bisnis
+┃ 👥  Monitor absensi
+┃ 💸  Catat transaksi
+┃ 💬  Semua via WhatsApp!
+└──────────────────────
 
-👉 *+62 822-4040-0388*
-atau klik: https://wa.me/6282240400388
+*🎯 Tertarik berlangganan?*
+Hubungi admin kami:
 
-_Bisnis lebih pintar dimulai dari satu pesan._ 🚀`;
+📱 *+62 822-4040-0388*
+🔗 https://wa.me/6282240400388
+
+━━━━━━━━━━━━━━━━━━━━━━
+_Bisnis lebih pintar dimulai dari satu pesan_ 💡`;
             await axios.post("https://api.fonnte.com/send", {
                 target: senderKey,
                 message: pesanMarketing
@@ -229,15 +256,27 @@ _Bisnis lebih pintar dimulai dari satu pesan._ 🚀`;
                 ? "AKSES: ADMIN. Boleh tampilkan semua data termasuk modal dan gaji."
                 : "AKSES: CUSTOMER. Rahasiakan modal dan gaji. Hanya tampilkan stok dan harga jual.";
 
-            const promptFokus = `Anda adalah "Corpo" asisten AI bisnis. Pengguna memilih menu *${sheetDipilih}* ${getIcon(sheetDipilih)}.
+            const icon = getIcon(sheetDipilih);
 
-Tampilkan ringkasan data dari sheet "${sheetDipilih}" secara rapi dan ringkas. Jangan tampilkan sheet lain.
+            const promptFokus =
+`Anda adalah "Corpo" asisten AI bisnis profesional dan friendly.
+Pengguna memilih menu *${sheetDipilih}* ${icon}.
 
-FORMAT PESAN (WhatsApp):
-- DILARANG tabel markdown.
-- Gunakan *teks* untuk tebal.
-- Emoji secukupnya.
-- Pisahkan item dengan ──────────────────
+Tampilkan data dari sheet "${sheetDipilih}" dengan format berikut:
+
+ATURAN FORMAT WAJIB (WhatsApp):
+- Mulai dengan header: ${icon} *${sheetDipilih.toUpperCase()}*
+- Gunakan garis pemisah: ──────────────────
+- Setiap item/baris data tampilkan dengan icon label yang relevan, contoh:
+    📌 *Nama:* Budi
+    💰 *Harga:* Rp 50.000
+    📦 *Stok:* 12 pcs
+    📅 *Tanggal:* 1 Jan 2025
+- Pisahkan tiap entri dengan: ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
+- Tutup dengan ringkasan singkat jika relevan (total, jumlah, dsb)
+- DILARANG tabel markdown (| col |)
+- Gunakan *teks* untuk tebal
+- Ringkas, rapi, enak dibaca di HP
 
 DATA SPREADSHEET:
 ${dataBisnis}
@@ -250,7 +289,7 @@ ${roleInstruction}`;
                     model: 'llama-3.3-70b-versatile',
                     messages: [
                         { role: 'system', content: promptFokus },
-                        { role: 'user',   content: `Tampilkan data ${sheetDipilih}` }
+                        { role: 'user',   content: `Tampilkan semua data dari sheet ${sheetDipilih}` }
                     ],
                     max_tokens: 1024,
                     temperature: 0.7
@@ -279,9 +318,20 @@ ${roleInstruction}`;
                     keterangan : transaksi.keterangan || message,
                     nominal    : transaksi.nominal
                 });
+                const ikonTipe = transaksi.tipe === 'Pemasukan' ? '💰' : '💸';
                 const pesanBalas = hasilCatat.status === 'ok'
-                    ? `✅ *${transaksi.tipe} berhasil dicatat!*\n\n💰 Nominal: Rp ${transaksi.nominal.toLocaleString('id-ID')}\n📝 Keterangan: ${transaksi.keterangan || '-'}\n\nData sudah masuk ke spreadsheet Bos 📊`
-                    : `⚠️ Gagal catat transaksi Bos: ${hasilCatat.pesan}`;
+                    ? `╔══════════════════════╗
+║  ✅  BERHASIL DICATAT  ║
+╚══════════════════════╝
+
+${ikonTipe} *${transaksi.tipe}*
+──────────────────────
+💵 *Nominal  :* Rp ${transaksi.nominal.toLocaleString('id-ID')}
+📝 *Keterangan:* ${transaksi.keterangan || '-'}
+📅 *Waktu    :* ${new Date().toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}
+──────────────────────
+📊 Data sudah masuk ke spreadsheet Bos!`
+                    : `⚠️ *Gagal catat transaksi*\n\n${hasilCatat.pesan}`;
                 await axios.post('https://api.fonnte.com/send', {
                     target: senderKey, message: pesanBalas
                 }, { headers: { 'Authorization': FONNTE_TOKEN.trim() } });
@@ -296,7 +346,8 @@ ${roleInstruction}`;
             ? "AKSES: ADMIN (pemilik bisnis). Boleh tampilkan semua data termasuk modal dan gaji jika ditanya."
             : "AKSES: CUSTOMER. Rahasiakan data modal dan gaji. Hanya tampilkan stok dan harga jual jika ditanya.";
 
-        const systemPrompt = `Anda adalah "Corpo" (Corpomind), asisten AI bisnis yang cerdas dan sedikit humoris. Panggil pengguna dengan "Bos".
+        const systemPrompt =
+`Anda adalah "Corpo" (Corpomind), asisten AI bisnis yang cerdas, profesional, dan friendly. Panggil pengguna dengan "Bos".
 
 # KEPRIBADIAN:
 - Profesional tapi santai dan hangat.
@@ -304,30 +355,26 @@ ${roleInstruction}`;
 - Tetap sopan, tidak lebay.
 
 # ATURAN JAWAB — WAJIB DIIKUTI:
-
 1. JANGAN tampilkan semua data sekaligus tanpa diminta.
 2. Jawab HANYA sesuai yang ditanya.
-3. Sapaan saja ("oi", "halo", "p", dll) → tampilkan menu pilihan sheet yang tersedia.
+3. Sapaan saja → balas ramah, tanpa tampilkan data.
+4. Pesan tidak berkaitan bisnis → balas singkat lucu/santai, lalu tawarkan bantuan bisnis.
+5. Pertanyaan kurang detail → WAJIB tanya dulu, jangan tebak.
+6. Data tidak ada di spreadsheet → beritahu sopan.
+7. Data ditemukan → tampilkan HANYA yang diminta.
 
-4. Pesan TIDAK BERKAITAN bisnis → balas singkat dengan nada lucu/santai, lalu tawarkan bantuan bisnis.
-   Contoh:
-   Bos: "nongkrong yuk"
-   Corpo: "Aduh Bos, Corpo mah 24 jam di sini jagain data bisnis 😅 Bos yang nongkrong duluan aja, nanti kalau mau cek stok Corpo siap! 🫡"
-
-5. Pertanyaan KURANG DETAIL → WAJIB tanya dulu, jangan tebak.
-   Contoh:
-   Bos: "cek stok" → Corpo: "Stok barang apa Bos? 📦"
-
-6. Nama/data TIDAK ADA di spreadsheet → beritahu sopan.
-
-7. Data DITEMUKAN → tampilkan HANYA data yang diminta, rapi dan ringkas.
-
-# FORMAT PESAN (WhatsApp):
-- DILARANG tabel markdown (| kolom | kolom |).
-- Gunakan *teks* untuk tebal.
-- Emoji secukupnya (📦 ✅ ⚠️ 📊 💰 🫡 😅 💪).
-- Pisahkan item dengan ──────────────────
-- Ringkas dan enak dibaca di layar HP.
+# FORMAT WAJIB SETIAP TAMPILKAN DATA (WhatsApp):
+- Header dengan icon dan nama data: misal 📦 *STOK BARANG*
+- Garis pemisah: ──────────────────
+- Setiap field pakai icon + label tebal, contoh:
+    📌 *Nama     :* Sabun Mandi
+    💰 *Harga    :* Rp 5.000
+    📦 *Stok     :* 30 pcs
+    ⚠️ *Status   :* Hampir habis
+- Pisahkan tiap entri dengan: ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
+- Tutup dengan ringkasan jika relevan
+- DILARANG tabel markdown (| col |)
+- Ringkas dan enak dibaca di layar HP
 
 # DATA SPREADSHEET:
 ${dataBisnis}
