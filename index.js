@@ -7,9 +7,14 @@ app.use(express.json());
 const GROQ_KEY     = (process.env.GROQ_API_KEY  || '').trim();
 const FONNTE_TOKEN = (process.env.FONNTE_TOKEN   || '').trim();
 const MustikaPay   = require('mustikapay-node');
-const mp           = new MustikaPay(); // otomatis baca MUSTIKAPAY_API_KEY dari env
+const mp           = new MustikaPay();
 
-const HARGA_BERLANGGANAN = 50000; // Rp 50.000 — ganti sesuai kebutuhan
+// ─── Konfigurasi Owner ───────────────────────
+const OWNER_NAMA     = 'Corpomind';
+const OWNER_NOMOR    = '6282240400388';
+const OWNER_WA_LINK  = 'https://wa.me/6282240400388';
+const BASE_URL       = process.env.BASE_URL || 'https://jarvis-mode-production.up.railway.app';
+const HARGA          = 50000; // Rp 50.000
 
 // ─────────────────────────────────────────────
 //  Helpers: baca / tulis users.json
@@ -23,8 +28,7 @@ function writeUsers(data) {
 }
 
 // ─────────────────────────────────────────────
-//  Session pendaftaran sementara (in-memory)
-//  { [nomorWA]: { step, nama, nomorBot, sheet, refNo } }
+//  Session pendaftaran sementara
 // ─────────────────────────────────────────────
 const regSession = {};
 
@@ -103,8 +107,8 @@ _Contoh: ketik *"1"* untuk ${sheets[0] || 'menu pertama'}_
 🕐 Siap melayani 24 jam!`;
 }
 
-function isSapaan(message) {
-    const msg = message.trim();
+function isSapaan(msg) {
+    msg = msg.trim();
     if (/^\d+$/.test(msg)) return false;
     if (msg.length <= 3)   return true;
     return /^(halo|hai|hi|hei|oi|ping|assalam|selamat|pagi|siang|sore|malam|menu|help|bantuan|start|mulai|hallo|hello|hey|corpo|corpomind|bot|test|tes|coba|buka|open)\b/i.test(msg);
@@ -125,7 +129,7 @@ async function catatTransaksi(sheetUrl, payload) {
     return res.data;
 }
 function deteksiTransaksi(message) {
-    const msg = message.toLowerCase();
+    const msg             = message.toLowerCase();
     const polaPengeluaran = /\b(beli|bayar|keluar|pengeluaran|belanja|setor|bayarin|biaya)\b/i;
     const polaPemasukan   = /\b(terima|masuk|pemasukan|untung|laba|dapat|penjualan|terjual)\b/i;
     const polaAngka       = /(\d[\d.,]*)\s*(rb|ribu|rbu|jt|juta|k)?/i;
@@ -137,7 +141,7 @@ function deteksiTransaksi(message) {
     const satuan = (matchAngka[2] || '').toLowerCase();
     if (/^(rb|ribu|rbu|k)$/.test(satuan)) nominal *= 1000;
     if (/^(jt|juta)$/.test(satuan))       nominal *= 1_000_000;
-    const tipe = adaPemasukan ? 'Pemasukan' : 'Pengeluaran';
+    const tipe       = adaPemasukan ? 'Pemasukan' : 'Pengeluaran';
     const keterangan = message.replace(polaAngka,'').replace(polaPengeluaran,'').replace(polaPemasukan,'').replace(/catat|tolong|dong|ya|yuk/gi,'').trim();
     return { tipe, nominal, keterangan, sheet: tipe };
 }
@@ -154,7 +158,7 @@ function addHistory(key, role, text) {
 }
 
 // ─────────────────────────────────────────────
-//  Kirim pesan WA via Fonnte
+//  Kirim WA via Fonnte
 // ─────────────────────────────────────────────
 async function kirim(target, message) {
     await axios.post('https://api.fonnte.com/send',
@@ -170,7 +174,14 @@ async function handleRegistrasi(senderKey, message) {
     const msg  = message.trim();
     const sess = regSession[senderKey];
 
-    // ── Mulai daftar ──
+    // Batalkan sesi
+    if (sess && /^(batal|cancel|stop)$/i.test(msg)) {
+        delete regSession[senderKey];
+        await kirim(senderKey, '❌ Pendaftaran dibatalkan. Ketik *daftar* kapan saja untuk memulai lagi.');
+        return true;
+    }
+
+    // Mulai daftar
     if (!sess && /^(daftar|register|subscribe|langganan)$/i.test(msg)) {
         regSession[senderKey] = { step: 'nama' };
         await kirim(senderKey,
@@ -179,20 +190,20 @@ async function handleRegistrasi(senderKey, message) {
 ║     Corpo Bot        ║
 ╚══════════════════════╝
 
-Halo! Selamat datang di proses pendaftaran *Corpo* 🤖
+Halo! Selamat datang di *${OWNER_NAMA}* 🤖
 
-Saya akan memandu Anda dalam beberapa langkah mudah.
+Saya akan memandu Anda dalam 3 langkah mudah.
+Ketik *batal* kapan saja untuk membatalkan.
 
 ━━━━━━━━━━━━━━━━━━━━━━
-*Langkah 1 dari 3*
-📌 Silakan ketik *nama bisnis* Anda:`
-        );
+*Langkah 1 dari 3* 🏢
+Ketik *nama bisnis* Anda:`);
         return true;
     }
 
-    if (!sess) return false; // bukan sesi registrasi
+    if (!sess) return false;
 
-    // ── Step: nama bisnis ──
+    // Step 1: Nama bisnis
     if (sess.step === 'nama') {
         regSession[senderKey].nama = msg;
         regSession[senderKey].step = 'nomorBot';
@@ -200,48 +211,49 @@ Saya akan memandu Anda dalam beberapa langkah mudah.
 `✅ Nama bisnis: *${msg}*
 
 ━━━━━━━━━━━━━━━━━━━━━━
-*Langkah 2 dari 3*
-📱 Masukkan *nomor WhatsApp bot* Anda (nomor yang akan dipakai Corpo):
+*Langkah 2 dari 3* 📱
+Masukkan *nomor WhatsApp bot* Anda:
+_(nomor yang akan dipakai Corpo menjawab)_
 
-_Contoh: 628123456789_`
-        );
+_Contoh: 628123456789_`);
         return true;
     }
 
-    // ── Step: nomor bot ──
+    // Step 2: Nomor bot
     if (sess.step === 'nomorBot') {
         const nomor = msg.replace(/[^0-9]/g, '');
+        if (nomor.length < 10) {
+            await kirim(senderKey, '⚠️ Nomor tidak valid. Masukkan nomor WA yang benar ya Bos!\n_Contoh: 628123456789_');
+            return true;
+        }
         regSession[senderKey].nomorBot = nomor;
         regSession[senderKey].step     = 'sheet';
         await kirim(senderKey,
 `✅ Nomor bot: *${nomor}*
 
 ━━━━━━━━━━━━━━━━━━━━━━
-*Langkah 3 dari 3*
-📊 Masukkan *link Google Sheet* bisnis Anda:
+*Langkah 3 dari 3* 📊
+Masukkan *link Google Sheet* bisnis Anda:
 
 _Contoh:_
 _https://script.google.com/macros/s/xxx/exec_
 
-⚠️ Pastikan sheet sudah di-deploy sebagai Web App dan aksesnya *Anyone*`
-        );
+⚠️ Pastikan sheet sudah di-deploy sebagai *Web App* dan akses diset ke *Anyone*`);
         return true;
     }
 
-    // ── Step: link sheet ──
+    // Step 3: Link sheet
     if (sess.step === 'sheet') {
         if (!msg.startsWith('http')) {
-            await kirim(senderKey, '⚠️ Link tidak valid. Pastikan dimulai dengan *https://* ya Bos!');
+            await kirim(senderKey, '⚠️ Link tidak valid. Harus dimulai dengan *https://* ya Bos!');
             return true;
         }
         regSession[senderKey].sheet = msg;
         regSession[senderKey].step  = 'bayar';
 
-        // Buat QRIS via MustikaPay
         try {
-            const qris = await mp.createQris(HARGA_BERLANGGANAN);
+            const qris = await mp.createQris(HARGA);
             if (qris.status !== 'success') throw new Error(qris.message || 'Gagal buat QRIS');
-
             regSession[senderKey].refNo = qris.ref_no;
 
             await kirim(senderKey,
@@ -257,29 +269,26 @@ _https://script.google.com/macros/s/xxx/exec_
 
 *💳 PEMBAYARAN*
 ┌──────────────────────
-┃ 💰 *Total     :* Rp ${HARGA_BERLANGGANAN.toLocaleString('id-ID')}
-┃ 🔖 *Ref No    :* ${qris.ref_no}
+┃ 💰 *Total  :* Rp ${HARGA.toLocaleString('id-ID')}
+┃ 🔖 *Ref No :* ${qris.ref_no}
 └──────────────────────
 
-Scan QRIS di bawah untuk menyelesaikan pembayaran:
+Scan QRIS berikut untuk menyelesaikan:
 🔗 ${qris.qr_url}
 
 ━━━━━━━━━━━━━━━━━━━━━━
-⏳ QR berlaku 30 menit
-✅ Akun aktif otomatis setelah pembayaran berhasil`
-            );
+⏳ QR berlaku *30 menit*
+✅ Akun aktif *otomatis* setelah bayar`);
         } catch (err) {
             console.error('[QRIS ERROR]', err.message);
             delete regSession[senderKey];
-            await kirim(senderKey, `⚠️ Gagal membuat QRIS. Silakan coba lagi dengan ketik *daftar*\n\nError: ${err.message}`);
-        }
-        return true;
-    }
+            await kirim(senderKey,
+`⚠️ Gagal membuat QRIS. Silakan coba lagi dengan ketik *daftar*
 
-    // ── Batalkan sesi ──
-    if (/^(batal|cancel|stop)$/i.test(msg)) {
-        delete regSession[senderKey];
-        await kirim(senderKey, '❌ Pendaftaran dibatalkan. Ketik *daftar* kapan saja untuk memulai lagi.');
+Atau hubungi kami langsung:
+📱 *+62 822-4040-0388*
+🔗 ${OWNER_WA_LINK}`);
+        }
         return true;
     }
 
@@ -287,72 +296,73 @@ Scan QRIS di bawah untuk menyelesaikan pembayaran:
 }
 
 // ═══════════════════════════════════════════════════════
-//  WEBHOOK MUSTIKPAY — dipanggil setelah bayar berhasil
+//  WEBHOOK MUSTIKPAY CALLBACK
 // ═══════════════════════════════════════════════════════
 app.post('/payment/callback', async (req, res) => {
     res.status(200).send('OK');
     console.log('[CALLBACK] MustikaPay:', JSON.stringify(req.body));
 
-    // Verifikasi signature
     const isValid = mp.verifyCallback(req.body, req.headers['x-signature']);
-    if (!isValid) {
-        console.warn('[CALLBACK] Signature tidak valid, diabaikan.');
-        return;
-    }
+    if (!isValid) { console.warn('[CALLBACK] Signature tidak valid'); return; }
 
     const { ref_no, status } = req.body;
     if (status !== 'success' && status !== 'paid') return;
 
-    // Cari sesi yang cocok dengan ref_no
     const senderKey = Object.keys(regSession).find(k => regSession[k].refNo === ref_no);
-    if (!senderKey) {
-        console.warn('[CALLBACK] Ref no tidak ditemukan di sesi:', ref_no);
-        return;
-    }
+    if (!senderKey) { console.warn('[CALLBACK] Ref no tidak ditemukan:', ref_no); return; }
 
-    const sess = regSession[senderKey];
-
-    // Simpan ke users.json
+    const sess  = regSession[senderKey];
     const users = readUsers();
+
     users[sess.nomorBot] = {
         sheet : sess.sheet,
-        admin : '',          // owner isi manual
+        admin : '',
         nama  : sess.nama,
         aktif : true,
         daftar: new Date().toISOString()
     };
     writeUsers(users);
-
-    // Hapus sesi
     delete regSession[senderKey];
 
-    console.log(`[REGISTRASI] Akun baru aktif: ${sess.nomorBot} — ${sess.nama}`);
+    console.log(`[REGISTRASI SUKSES] ${sess.nomorBot} — ${sess.nama}`);
 
-    // Kirim notif ke pendaftar
+    // Notif ke pendaftar
     await kirim(senderKey,
 `╔══════════════════════╗
 ║  ✅  PEMBAYARAN OK!  ║
 ╚══════════════════════╝
 
-Yeay! Pembayaran berhasil dikonfirmasi 🎉
-
+Yeay! Pembayaran berhasil 🎉
 *Akun Corpo Anda sudah AKTIF!*
+
 ┌──────────────────────
-┃ 🏢 *Bisnis  :* ${sess.nama}
-┃ 📱 *Bot     :* ${sess.nomorBot}
-┃ 📅 *Aktif   :* ${new Date().toLocaleDateString('id-ID')}
+┃ 🏢 *Bisnis :* ${sess.nama}
+┃ 📱 *Bot    :* ${sess.nomorBot}
+┃ 📅 *Aktif  :* ${new Date().toLocaleDateString('id-ID')}
 └──────────────────────
 
 *Langkah selanjutnya:*
 1️⃣ Hubungkan nomor *${sess.nomorBot}* ke Fonnte
-2️⃣ Hubungi owner untuk set nomor admin Anda
+2️⃣ Hubungi kami untuk set nomor admin:
 
-📞 *+62 822-4040-0388*
+📱 *+62 822-4040-0388*
+🔗 ${OWNER_WA_LINK}
 
 ━━━━━━━━━━━━━━━━━━━━━━
 Terima kasih sudah bergabung! 🚀
-_Bisnis lebih pintar dengan Corpo_ 🤖`
-    );
+_Powered by ${OWNER_NAMA}_ 🤖`);
+
+    // Notif ke owner (opsional)
+    await kirim(OWNER_NOMOR,
+`🔔 *PENDAFTAR BARU!*
+
+┌──────────────────────
+┃ 🏢 *Bisnis :* ${sess.nama}
+┃ 📱 *Bot    :* ${sess.nomorBot}
+┃ 📞 *WA     :* ${senderKey}
+┃ 💰 *Bayar  :* Rp ${HARGA.toLocaleString('id-ID')}
+└──────────────────────
+⚠️ Jangan lupa set nomor *admin* di users.json!`);
 });
 
 // ═══════════════════════════════════════════════════════
@@ -368,14 +378,14 @@ app.post('/webhook', async (req, res) => {
     const senderKey = normalize(sender);
 
     try {
-        // ── Cek dulu apakah sedang dalam sesi registrasi ──
+        // Cek sesi registrasi dulu
         const handled = await handleRegistrasi(senderKey, message);
         if (handled) return;
 
-        const userData = JSON.parse(fs.readFileSync('./users.json','utf8'));
+        const userData = readUsers();
         const config   = userData[deviceKey];
 
-        // ── Nomor belum terdaftar ──
+        // Nomor belum terdaftar / tidak aktif
         if (!config || !config.sheet || !config.aktif) {
             await kirim(senderKey,
 `╔══════════════════════╗
@@ -383,7 +393,7 @@ app.post('/webhook', async (req, res) => {
 ║  Asisten AI Bisnis   ║
 ╚══════════════════════╝
 
-Halo! 👋 Senang berkenalan dengan Anda!
+Halo! 👋 Selamat datang di *${OWNER_NAMA}*!
 
 Saya *Corpo* — Asisten AI Bisnis yang siap membuat usaha Anda lebih *cerdas & efisien* 🚀
 
@@ -399,13 +409,12 @@ Saya *Corpo* — Asisten AI Bisnis yang siap membuat usaha Anda lebih *cerdas & 
 *🎯 Daftar sekarang, ketik:*
 👉 *daftar*
 
-Atau hubungi admin:
+Atau hubungi kami:
 📱 *+62 822-4040-0388*
-🔗 https://wa.me/6282240400388
+🔗 ${OWNER_WA_LINK}
 
 ━━━━━━━━━━━━━━━━━━━━━━
-_Bisnis lebih pintar dimulai dari satu pesan_ 💡`
-            );
+_Bisnis lebih pintar dimulai dari satu pesan_ 💡`);
             return;
         }
 
@@ -417,27 +426,20 @@ _Bisnis lebih pintar dimulai dari satu pesan_ 💡`
         if (sheetDipilih) {
             const dataBisnis = await getSheetData(config.sheet);
             const icon = getIcon(sheetDipilih);
-            const roleInstruction = isAdmin
-                ? 'AKSES: ADMIN. Boleh tampilkan semua data termasuk modal dan gaji.'
-                : 'AKSES: CUSTOMER. Rahasiakan modal dan gaji.';
+            const role = isAdmin ? 'AKSES: ADMIN. Boleh tampilkan semua data.' : 'AKSES: CUSTOMER. Rahasiakan modal dan gaji.';
             const promptFokus =
 `Anda adalah "Corpo" asisten AI bisnis profesional dan friendly.
 Pengguna memilih menu *${sheetDipilih}* ${icon}.
-
-Tampilkan data dari sheet "${sheetDipilih}" dengan format berikut:
-
-ATURAN FORMAT WAJIB (WhatsApp):
+Tampilkan data dari sheet "${sheetDipilih}".
+FORMAT WAJIB (WhatsApp):
 - Header: ${icon} *${sheetDipilih.toUpperCase()}*
 - Garis: ──────────────────
-- Setiap field pakai icon + label tebal + spasi rapi:
-    📌 *Nama      :* ...
-    💰 *Harga     :* Rp ...
-    📦 *Stok      :* ... pcs
-- Pisahkan tiap entri: ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
-- Tutup dengan ringkasan jika relevan
+- Field: icon + *label* + spasi rapi (contoh: 📌 *Nama :* Budi)
+- Pisah entri: ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
+- Ringkasan di akhir jika relevan
 - DILARANG tabel markdown
 DATA: ${dataBisnis}
-${roleInstruction}`;
+${role}`;
             const ai = await axios.post('https://api.groq.com/openai/v1/chat/completions',
                 { model:'llama-3.3-70b-versatile', messages:[{role:'system',content:promptFokus},{role:'user',content:`Tampilkan data ${sheetDipilih}`}], max_tokens:1024, temperature:0.7 },
                 { headers:{ Authorization:`Bearer ${GROQ_KEY}`, 'Content-Type':'application/json' } }
@@ -449,7 +451,7 @@ ${roleInstruction}`;
             return;
         }
 
-        // ── 2. SAPAAN ──
+        // ── 2. SAPAAN → menu ──
         if (isSapaan(message)) {
             const menu = buildMenu(sheets, name);
             await kirim(senderKey, menu);
@@ -465,7 +467,7 @@ ${roleInstruction}`;
                     action:'catat', sheet:transaksi.sheet, tipe:transaksi.tipe,
                     kategori:'Umum', keterangan:transaksi.keterangan||message, nominal:transaksi.nominal
                 });
-                const ikon = transaksi.tipe === 'Pemasukan' ? '💰' : '💸';
+                const ikon  = transaksi.tipe === 'Pemasukan' ? '💰' : '💸';
                 const balas = hasil.status === 'ok'
                     ? `╔══════════════════════╗\n║  ✅  BERHASIL DICATAT  ║\n╚══════════════════════╝\n\n${ikon} *${transaksi.tipe}*\n──────────────────────\n💵 *Nominal    :* Rp ${transaksi.nominal.toLocaleString('id-ID')}\n📝 *Keterangan :* ${transaksi.keterangan||'-'}\n📅 *Waktu      :* ${new Date().toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})}\n──────────────────────\n📊 Data sudah masuk ke spreadsheet Bos!`
                     : `⚠️ Gagal catat: ${hasil.pesan}`;
@@ -477,16 +479,14 @@ ${roleInstruction}`;
 
         // ── 4. CHAT UMUM → AI ──
         const dataBisnis = await getSheetData(config.sheet);
-        const roleInstruction = isAdmin
-            ? 'AKSES: ADMIN. Boleh tampilkan semua data termasuk modal dan gaji.'
-            : 'AKSES: CUSTOMER. Rahasiakan modal dan gaji.';
+        const role = isAdmin ? 'AKSES: ADMIN. Boleh tampilkan semua data.' : 'AKSES: CUSTOMER. Rahasiakan modal dan gaji.';
         const systemPrompt =
 `Anda adalah "Corpo" (Corpomind), asisten AI bisnis cerdas dan friendly. Panggil pengguna "Bos".
 KEPRIBADIAN: Profesional, santai, hangat, sedikit humoris.
 ATURAN: Jawab sesuai yang ditanya saja. Tanya dulu jika kurang detail. Beritahu sopan jika data tidak ada.
-FORMAT (WhatsApp): Header+icon, garis ──────, field pakai icon+label tebal, pisah entri ─ ─ ─ ─, DILARANG tabel markdown.
+FORMAT (WhatsApp): Header+icon, garis ──────, field pakai icon+*label* tebal, pisah entri ─ ─ ─, DILARANG tabel markdown.
 DATA: ${dataBisnis}
-${roleInstruction}`;
+${role}`;
 
         addHistory(senderKey,'user',message);
         const messages = [
@@ -507,6 +507,6 @@ ${roleInstruction}`;
     }
 });
 
-app.get('/', (req, res) => res.send('Corpo Bot LIVE ✅'));
+app.get('/', (req, res) => res.send(`${OWNER_NAMA} Bot LIVE ✅ — ${BASE_URL}`));
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`CORPO LIVE ON PORT ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`${OWNER_NAMA} LIVE ON PORT ${PORT}`));
