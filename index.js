@@ -25,9 +25,6 @@ async function getSheetData(url) {
     return sheetsCache[url].data;
 }
 
-// ─────────────────────────────────────────────
-//  Ambil daftar nama sheet dari Apps Script
-// ─────────────────────────────────────────────
 async function getSheetNames(url) {
     const res = await axios.get(url, { params: { action: 'sheets' } });
     return res.data.sheets || [];
@@ -65,7 +62,7 @@ function getIcon(namaSheet) {
 }
 
 // ─────────────────────────────────────────────
-//  Bangun teks menu — gaya campuran profesional
+//  Bangun teks menu
 // ─────────────────────────────────────────────
 function buildMenu(sheets, namaUser) {
     fallbackIndex = 0;
@@ -100,16 +97,19 @@ _Contoh: ketik *"1"* untuk ${sheets[0] || 'menu pertama'}_
 }
 
 // ─────────────────────────────────────────────
-//  Deteksi sapaan
+//  Deteksi sapaan (BUKAN angka)
 // ─────────────────────────────────────────────
 function isSapaan(message) {
-    const msg = message.trim().toLowerCase();
+    const msg = message.trim();
 
-    // Pesan sangat pendek (1-4 karakter) → langsung anggap sapaan
-    if (msg.length <= 4) return true;
+    // Kalau isinya angka murni → BUKAN sapaan (itu pilihan menu)
+    if (/^\d+$/.test(msg)) return false;
+
+    // Pesan sangat pendek non-angka (1-3 karakter) → anggap sapaan
+    if (msg.length <= 3) return true;
 
     // Kata kunci sapaan eksplisit
-    return /^(halo|hai|hi|hei|oi|ping|assalam|selamat|pagi|siang|sore|malam|menu|help|bantuan|start|mulai|hallo|hello|hey|corpo|corpomind|bot|p+|h+|hei+|test|tes|coba|cobain|buka|open)\b/i.test(msg);
+    return /^(halo|hai|hi|hei|oi|ping|assalam|selamat|pagi|siang|sore|malam|menu|help|bantuan|start|mulai|hallo|hello|hey|corpo|corpomind|bot|test|tes|coba|buka|open)\b/i.test(msg);
 }
 
 // ─────────────────────────────────────────────
@@ -239,21 +239,18 @@ _Bisnis lebih pintar dimulai dari satu pesan_ 💡`;
 
         const isAdmin = senderKey === config.admin || senderKey.includes(config.admin);
 
-        // ── 1. SAPAAN → tampilkan menu otomatis ──
-        if (isSapaan(message)) {
-            console.log(`[MENU] Sapaan terdeteksi dari ${senderKey}`);
-            const sheets = await getSheetNames(config.sheet);
-            const menu   = buildMenu(sheets, name);
-            await axios.post('https://api.fonnte.com/send', {
-                target : senderKey,
-                message: menu
-            }, { headers: { 'Authorization': FONNTE_TOKEN.trim() } });
-            addHistory(senderKey, 'assistant', menu);
-            return;
-        }
-
-        // ── 2. PILIH MENU ANGKA → AI fokus ke sheet itu ──
+        // Ambil daftar sheet sekali pakai untuk semua kondisi di bawah
         const sheets = await getSheetNames(config.sheet);
+
+        // ═══════════════════════════════════════════
+        // URUTAN PRIORITAS (PENTING — jangan diubah):
+        // 1. Cek angka menu DULU
+        // 2. Baru cek sapaan
+        // 3. Catat transaksi
+        // 4. Chat umum ke AI
+        // ═══════════════════════════════════════════
+
+        // ── 1. PILIH MENU ANGKA ──
         const sheetDipilih = deteksiPilihMenu(message, sheets);
         if (sheetDipilih) {
             console.log(`[MENU] User pilih sheet: ${sheetDipilih}`);
@@ -274,10 +271,10 @@ ATURAN FORMAT WAJIB (WhatsApp):
 - Mulai dengan header: ${icon} *${sheetDipilih.toUpperCase()}*
 - Gunakan garis pemisah: ──────────────────
 - Setiap item/baris data tampilkan dengan icon label yang relevan, contoh:
-    📌 *Nama:* Budi
-    💰 *Harga:* Rp 50.000
-    📦 *Stok:* 12 pcs
-    📅 *Tanggal:* 1 Jan 2025
+    📌 *Nama      :* Budi
+    💰 *Harga     :* Rp 50.000
+    📦 *Stok      :* 12 pcs
+    📅 *Tanggal   :* 1 Jan 2025
 - Pisahkan tiap entri dengan: ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
 - Tutup dengan ringkasan singkat jika relevan (total, jumlah, dsb)
 - DILARANG tabel markdown (| col |)
@@ -311,6 +308,18 @@ ${roleInstruction}`;
             return;
         }
 
+        // ── 2. SAPAAN → tampilkan menu otomatis ──
+        if (isSapaan(message)) {
+            console.log(`[MENU] Sapaan terdeteksi dari ${senderKey}`);
+            const menu = buildMenu(sheets, name);
+            await axios.post('https://api.fonnte.com/send', {
+                target : senderKey,
+                message: menu
+            }, { headers: { 'Authorization': FONNTE_TOKEN.trim() } });
+            addHistory(senderKey, 'assistant', menu);
+            return;
+        }
+
         // ── 3. CATAT TRANSAKSI (khusus admin) ──
         if (isAdmin) {
             const transaksi = deteksiTransaksi(message);
@@ -332,9 +341,9 @@ ${roleInstruction}`;
 
 ${ikonTipe} *${transaksi.tipe}*
 ──────────────────────
-💵 *Nominal  :* Rp ${transaksi.nominal.toLocaleString('id-ID')}
-📝 *Keterangan:* ${transaksi.keterangan || '-'}
-📅 *Waktu    :* ${new Date().toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}
+💵 *Nominal    :* Rp ${transaksi.nominal.toLocaleString('id-ID')}
+📝 *Keterangan :* ${transaksi.keterangan || '-'}
+📅 *Waktu      :* ${new Date().toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}
 ──────────────────────
 📊 Data sudah masuk ke spreadsheet Bos!`
                     : `⚠️ *Gagal catat transaksi*\n\n${hasilCatat.pesan}`;
@@ -370,13 +379,13 @@ ${ikonTipe} *${transaksi.tipe}*
 7. Data ditemukan → tampilkan HANYA yang diminta.
 
 # FORMAT WAJIB SETIAP TAMPILKAN DATA (WhatsApp):
-- Header dengan icon dan nama data: misal 📦 *STOK BARANG*
+- Header dengan icon dan nama data, contoh: 📦 *STOK BARANG*
 - Garis pemisah: ──────────────────
-- Setiap field pakai icon + label tebal, contoh:
-    📌 *Nama     :* Sabun Mandi
-    💰 *Harga    :* Rp 5.000
-    📦 *Stok     :* 30 pcs
-    ⚠️ *Status   :* Hampir habis
+- Setiap field pakai icon + label tebal + spasi rapi, contoh:
+    📌 *Nama      :* Sabun Mandi
+    💰 *Harga     :* Rp 5.000
+    📦 *Stok      :* 30 pcs
+    ⚠️ *Status    :* Hampir habis
 - Pisahkan tiap entri dengan: ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
 - Tutup dengan ringkasan jika relevan
 - DILARANG tabel markdown (| col |)
