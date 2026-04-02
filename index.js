@@ -346,6 +346,7 @@ function pesanHabisToken() {
 }
 
 
+function isSapaan(msg) {
     msg = msg.trim();
     if (/^\d+$/.test(msg)) return false;
     if (msg.length <= 3)   return true;
