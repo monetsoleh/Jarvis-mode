@@ -1,13 +1,14 @@
 const express = require('express');
 const axios   = require('axios');
-const fs      = require('fs');
+const { Pool } = require('pg');
 const app     = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const GROQ_KEY        = (process.env.GROQ_API_KEY       || '').trim();
-const FONNTE_TOKEN    = (process.env.FONNTE_TOKEN        || '').trim();
-const MUSTIKA_API_KEY = (process.env.MUSTIKAPAY_API_KEY  || '').trim();
+// ─── ENV ─────────────────────────────────────
+const GROQ_KEY        = (process.env.GROQ_API_KEY      || '').trim();
+const FONNTE_TOKEN    = (process.env.FONNTE_TOKEN       || '').trim();
+const MUSTIKA_API_KEY = (process.env.MUSTIKAPAY_API_KEY || '').trim();
 
 // ─── Konfigurasi Owner ───────────────────────
 const OWNER_NAMA    = 'Corpomind';
@@ -16,12 +17,78 @@ const OWNER_WA_LINK = 'https://wa.me/6282240400388';
 const BASE_URL      = process.env.BASE_URL || 'https://jarvis-mode-production.up.railway.app';
 const HARGA         = 50000;
 
-// ─────────────────────────────────────────────
-//  MustikaPay Helper — sesuai docs v1.6
-//  Base URL   : https://mustikapayment.com
-//  Auth       : X-Api-Key header
-//  POST type  : application/x-www-form-urlencoded
-// ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════
+//  POSTGRESQL — Railway auto-set DATABASE_URL
+// ═══════════════════════════════════════════════════════
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+});
+
+async function initDB() {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS users (
+            nomor_bot TEXT PRIMARY KEY,
+            sheet     TEXT,
+            admin     TEXT DEFAULT '',
+            nama      TEXT,
+            aktif     BOOLEAN DEFAULT true,
+            daftar    TIMESTAMPTZ DEFAULT NOW()
+        )
+    `);
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS reg_sessions (
+            sender_key TEXT PRIMARY KEY,
+            data       JSONB,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )
+    `);
+    console.log('[DB] Tabel siap.');
+}
+initDB().catch(err => console.error('[DB ERROR] initDB:', err.message));
+
+// ── CRUD users ──────────────────────────────
+async function getUser(nomorBot) {
+    const r = await pool.query('SELECT * FROM users WHERE nomor_bot = $1', [nomorBot]);
+    return r.rows[0] || null;
+}
+
+async function saveUser(nomorBot, data) {
+    await pool.query(`
+        INSERT INTO users (nomor_bot, sheet, admin, nama, aktif, daftar)
+        VALUES ($1, $2, $3, $4, $5, NOW())
+        ON CONFLICT (nomor_bot) DO UPDATE
+        SET sheet = $2, admin = $3, nama = $4, aktif = $5
+    `, [nomorBot, data.sheet, data.admin || '', data.nama, data.aktif]);
+}
+
+// ── CRUD reg_sessions ────────────────────────
+async function getSession(senderKey) {
+    const r = await pool.query('SELECT data FROM reg_sessions WHERE sender_key = $1', [senderKey]);
+    return r.rows[0]?.data || null;
+}
+
+async function setSession(senderKey, data) {
+    await pool.query(`
+        INSERT INTO reg_sessions (sender_key, data, updated_at)
+        VALUES ($1, $2, NOW())
+        ON CONFLICT (sender_key) DO UPDATE SET data = $2, updated_at = NOW()
+    `, [senderKey, JSON.stringify(data)]);
+}
+
+async function deleteSession(senderKey) {
+    await pool.query('DELETE FROM reg_sessions WHERE sender_key = $1', [senderKey]);
+}
+
+// ═══════════════════════════════════════════════════════
+//  MUSTIKPAY HELPER
+//  Docs v1.6 — Base URL: https://mustikapayment.com
+//  Auth    : X-Api-Key header
+//  POST    : application/x-www-form-urlencoded
+//  Webhook : POST JSON → { status, service, amount,
+//            reference, order_id, timestamp,
+//            data: { ref_no, amount, issuer, rrn } }
+// ═══════════════════════════════════════════════════════
 const MUSTIKA_BASE = 'https://mustikapayment.com';
 
 async function createQRIS(amount, customerName = 'Pelanggan', productName = 'Berlangganan Corpo') {
@@ -55,25 +122,9 @@ async function cekStatusQRIS(refNo) {
     return res.data;
 }
 
-// ─────────────────────────────────────────────
-//  Helpers: baca / tulis users.json
-// ─────────────────────────────────────────────
-function readUsers() {
-    try { return JSON.parse(fs.readFileSync('./users.json', 'utf8')); }
-    catch { return {}; }
-}
-function writeUsers(data) {
-    fs.writeFileSync('./users.json', JSON.stringify(data, null, 2));
-}
-
-// ─────────────────────────────────────────────
-//  Session pendaftaran sementara
-// ─────────────────────────────────────────────
-const regSession = {};
-
-// ─────────────────────────────────────────────
-//  Cache Google Sheets
-// ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════
+//  CACHE GOOGLE SHEETS
+// ═══════════════════════════════════════════════════════
 const sheetsCache = {};
 const CACHE_TTL   = 5 * 60 * 1000;
 
@@ -84,16 +135,18 @@ async function getSheetData(url) {
     sheetsCache[url] = { data: JSON.stringify(res.data), time: now };
     return sheetsCache[url].data;
 }
+
 async function getSheetNames(url) {
     const res = await axios.get(url, { params: { action: 'sheets' } });
     return res.data.sheets || [];
 }
 
-// ─────────────────────────────────────────────
-//  Icon & Menu
-// ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════
+//  ICON & MENU
+// ═══════════════════════════════════════════════════════
 const ICON_FALLBACK = ['🗂️','📂','🗃️','📁','🔖','📎','🗄️','📃'];
 let fallbackIndex = 0;
+
 function getIcon(n) {
     n = n.toLowerCase();
     if (/stok|barang|inventori|gudang|produk/.test(n))     return '📦';
@@ -159,14 +212,15 @@ function deteksiPilihMenu(message, sheets) {
     return null;
 }
 
-// ─────────────────────────────────────────────
-//  Catat transaksi
-// ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════
+//  CATAT TRANSAKSI
+// ═══════════════════════════════════════════════════════
 async function catatTransaksi(sheetUrl, payload) {
     const res = await axios.post(sheetUrl, payload, { headers: { 'Content-Type': 'application/json' } });
     delete sheetsCache[sheetUrl];
     return res.data;
 }
+
 function deteksiTransaksi(message) {
     const msg             = message.toLowerCase();
     const polaPengeluaran = /\b(beli|bayar|keluar|pengeluaran|belanja|setor|bayarin|biaya)\b/i;
@@ -185,20 +239,21 @@ function deteksiTransaksi(message) {
     return { tipe, nominal, keterangan, sheet: tipe };
 }
 
-// ─────────────────────────────────────────────
-//  History chat
-// ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════
+//  HISTORY CHAT (in-memory, tidak kritis jika hilang)
+// ═══════════════════════════════════════════════════════
 const chatHistory = {};
 const MAX_HISTORY = 10;
+
 function addHistory(key, role, text) {
     if (!chatHistory[key]) chatHistory[key] = [];
     chatHistory[key].push({ role, parts: [{ text }] });
     if (chatHistory[key].length > MAX_HISTORY) chatHistory[key].shift();
 }
 
-// ─────────────────────────────────────────────
-//  Kirim WA via Fonnte
-// ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════
+//  KIRIM WA via Fonnte
+// ═══════════════════════════════════════════════════════
 async function kirim(target, message) {
     await axios.post('https://api.fonnte.com/send',
         { target, message },
@@ -211,18 +266,18 @@ async function kirim(target, message) {
 // ═══════════════════════════════════════════════════════
 async function handleRegistrasi(senderKey, message, name) {
     const msg  = message.trim();
-    const sess = regSession[senderKey];
+    const sess = await getSession(senderKey);
 
     // Batalkan sesi
     if (sess && /^(batal|cancel|stop)$/i.test(msg)) {
-        delete regSession[senderKey];
+        await deleteSession(senderKey);
         await kirim(senderKey, '❌ Pendaftaran dibatalkan. Ketik *daftar* kapan saja untuk memulai lagi.');
         return true;
     }
 
     // Mulai daftar
     if (!sess && /^(daftar|register|subscribe|langganan)$/i.test(msg)) {
-        regSession[senderKey] = { step: 'nama' };
+        await setSession(senderKey, { step: 'nama' });
         await kirim(senderKey,
 `╔══════════════════════╗
 ║  📝  *PENDAFTARAN*   ║
@@ -244,8 +299,7 @@ Ketik *nama bisnis* Anda:`);
 
     // Step 1: Nama bisnis
     if (sess.step === 'nama') {
-        regSession[senderKey].nama = msg;
-        regSession[senderKey].step = 'nomorBot';
+        await setSession(senderKey, { ...sess, nama: msg, step: 'nomorBot' });
         await kirim(senderKey,
 `✅ Nama bisnis: *${msg}*
 
@@ -265,8 +319,7 @@ _Contoh: 628123456789_`);
             await kirim(senderKey, '⚠️ Nomor tidak valid. Masukkan nomor WA yang benar!\n_Contoh: 628123456789_');
             return true;
         }
-        regSession[senderKey].nomorBot = nomor;
-        regSession[senderKey].step     = 'sheet';
+        await setSession(senderKey, { ...sess, nomorBot: nomor, step: 'sheet' });
         await kirim(senderKey,
 `✅ Nomor bot: *${nomor}*
 
@@ -287,17 +340,18 @@ _https://script.google.com/macros/s/xxx/exec_
             await kirim(senderKey, '⚠️ Link tidak valid. Harus dimulai dengan *https://*');
             return true;
         }
-        regSession[senderKey].sheet = msg;
-        regSession[senderKey].step  = 'bayar';
+
+        // Simpan sheet dulu, update step ke bayar
+        await setSession(senderKey, { ...sess, sheet: msg, step: 'bayar' });
 
         try {
-            // Buat QRIS sesuai docs v1.6 — POST /api/createpay
+            // Buat QRIS — POST /api/createpay (application/x-www-form-urlencoded)
             const qris = await createQRIS(HARGA, name || 'Pelanggan', 'Berlangganan Corpo');
 
             if (qris.status !== 'success') throw new Error(qris.message || 'Gagal membuat QRIS');
 
-            // Simpan ref_no untuk dicocokkan saat webhook callback masuk
-            regSession[senderKey].refNo = qris.ref_no;
+            // Simpan ref_no ke sesi — dipakai untuk mencocokkan webhook callback
+            await setSession(senderKey, { ...sess, sheet: msg, step: 'bayar', refNo: qris.ref_no });
 
             console.log(`[DAFTAR] ${senderKey} | ref_no: ${qris.ref_no} | nomor bot: ${sess.nomorBot}`);
 
@@ -327,7 +381,7 @@ Scan QRIS berikut untuk menyelesaikan:
 
         } catch (err) {
             console.error('[QRIS ERROR]', err.message);
-            delete regSession[senderKey];
+            await deleteSession(senderKey);
             await kirim(senderKey,
 `⚠️ Gagal membuat QRIS. Silakan coba lagi dengan ketik *daftar*
 
@@ -343,12 +397,26 @@ Atau hubungi kami:
 
 // ═══════════════════════════════════════════════════════
 //  WEBHOOK MUSTIKPAY CALLBACK
-//  Docs: POST payload berisi { status, service, amount,
-//        reference, order_id, timestamp,
-//        data: { ref_no, amount, issuer, rrn } }
+//
+//  POST payload dari Mustika (application/json):
+//  {
+//    "status"    : "success",
+//    "service"   : "QRIS",
+//    "amount"    : 10000,
+//    "reference" : "QR12345",      ← ini adalah ref_no
+//    "order_id"  : "INV123",
+//    "timestamp" : "2024-03-08 10:00:00",
+//    "data": {
+//      "ref_no"  : "QR12345",
+//      "amount"  : 10000,
+//      "issuer"  : "GOPAY",
+//      "rrn"     : "123456789012"
+//    }
+//  }
 // ═══════════════════════════════════════════════════════
 app.post('/payment/callback', async (req, res) => {
-    res.status(200).send('OK'); // Wajib balas 200 sesuai docs
+    // Wajib balas 200 dulu sesuai docs Mustika
+    res.status(200).send('OK');
     console.log('[CALLBACK] MustikaPay:', JSON.stringify(req.body));
 
     const body   = req.body;
@@ -360,7 +428,7 @@ app.post('/payment/callback', async (req, res) => {
         return;
     }
 
-    // Ambil ref_no dari root (reference) atau dari data.ref_no — sesuai docs
+    // Ambil ref_no: dari `reference` (root) atau `data.ref_no`
     const refNo = body.reference || (body.data && body.data.ref_no) || body.ref_no;
     if (!refNo) {
         console.warn('[CALLBACK] ref_no tidak ditemukan di payload');
@@ -369,26 +437,30 @@ app.post('/payment/callback', async (req, res) => {
 
     console.log('[CALLBACK] ref_no diterima:', refNo);
 
-    // Cari sesi pendaftaran yang cocok
-    const senderKey = Object.keys(regSession).find(k => regSession[k].refNo === refNo);
-    if (!senderKey) {
+    // Cari sesi di DB yang memiliki refNo cocok
+    const r = await pool.query(
+        `SELECT sender_key, data FROM reg_sessions WHERE data->>'refNo' = $1`,
+        [refNo]
+    );
+
+    if (!r.rows[0]) {
         console.warn('[CALLBACK] Tidak ada sesi untuk ref_no:', refNo);
         return;
     }
 
-    const sess  = regSession[senderKey];
-    const users = readUsers();
+    const senderKey = r.rows[0].sender_key;
+    const sess      = r.rows[0].data;
 
-    // Simpan ke users.json
-    users[sess.nomorBot] = {
-        sheet : sess.sheet,
-        admin : '',           // owner isi manual
-        nama  : sess.nama,
-        aktif : true,
-        daftar: new Date().toISOString()
-    };
-    writeUsers(users);
-    delete regSession[senderKey];
+    // Simpan user ke PostgreSQL
+    await saveUser(sess.nomorBot, {
+        sheet: sess.sheet,
+        admin: '',
+        nama : sess.nama,
+        aktif: true
+    });
+
+    // Hapus sesi pendaftaran
+    await deleteSession(senderKey);
 
     console.log(`[REGISTRASI SUKSES] nomor: ${sess.nomorBot} | bisnis: ${sess.nama}`);
 
@@ -429,7 +501,8 @@ _Powered by ${OWNER_NAMA}_ 🤖`);
 ┃ 💰 *Bayar  :* Rp ${HARGA.toLocaleString('id-ID')}
 ┃ 🔖 *Ref No :* ${refNo}
 └──────────────────────
-⚠️ Set nomor *admin* di users.json untuk nomor bot *${sess.nomorBot}*`);
+⚠️ Set nomor *admin* untuk nomor bot *${sess.nomorBot}* via perintah berikut:
+_Kirim ke bot: setadmin_${sess.nomorBot}_NOMOR_ADMIN_`);
 });
 
 // ─── Halaman sukses setelah redirect dari QRIS ───────
@@ -454,12 +527,30 @@ app.post('/webhook', async (req, res) => {
     const senderKey = normalize(sender);
 
     try {
-        // Cek sesi registrasi dulu
+        // ── Cek sesi registrasi dulu ──
         const handled = await handleRegistrasi(senderKey, message, name);
         if (handled) return;
 
-        const userData = readUsers();
-        const config   = userData[deviceKey];
+        // ── Cek perintah owner: setadmin ──
+        if (senderKey === OWNER_NOMOR && message.startsWith('setadmin_')) {
+            const parts = message.split('_');
+            // format: setadmin_NOMORBOT_NOMORADMIN
+            if (parts.length === 3) {
+                const targetBot   = parts[1];
+                const targetAdmin = parts[2];
+                const user = await getUser(targetBot);
+                if (user) {
+                    await saveUser(targetBot, { ...user, admin: targetAdmin });
+                    await kirim(OWNER_NOMOR, `✅ Admin untuk bot *${targetBot}* diset ke *${targetAdmin}*`);
+                } else {
+                    await kirim(OWNER_NOMOR, `⚠️ Nomor bot *${targetBot}* tidak ditemukan di database.`);
+                }
+            }
+            return;
+        }
+
+        // ── Ambil config user dari DB ──
+        const config = await getUser(deviceKey);
 
         // Nomor belum terdaftar / tidak aktif
         if (!config || !config.sheet || !config.aktif) {
@@ -502,7 +593,9 @@ _Bisnis lebih pintar dimulai dari satu pesan_ 💡`);
         if (sheetDipilih) {
             const dataBisnis = await getSheetData(config.sheet);
             const icon = getIcon(sheetDipilih);
-            const role = isAdmin ? 'AKSES: ADMIN. Boleh tampilkan semua data.' : 'AKSES: CUSTOMER. Rahasiakan modal dan gaji.';
+            const role = isAdmin
+                ? 'AKSES: ADMIN. Boleh tampilkan semua data.'
+                : 'AKSES: CUSTOMER. Rahasiakan modal dan gaji.';
             const promptFokus =
 `Anda adalah "Corpo" asisten AI bisnis profesional dan friendly.
 Pengguna memilih menu *${sheetDipilih}* ${icon}.
@@ -517,45 +610,59 @@ FORMAT WAJIB (WhatsApp):
 DATA: ${dataBisnis}
 ${role}`;
             const ai = await axios.post('https://api.groq.com/openai/v1/chat/completions',
-                { model:'llama-3.3-70b-versatile', messages:[{role:'system',content:promptFokus},{role:'user',content:`Tampilkan data ${sheetDipilih}`}], max_tokens:1024, temperature:0.7 },
-                { headers:{ Authorization:`Bearer ${GROQ_KEY}`, 'Content-Type':'application/json' } }
+                {
+                    model   : 'llama-3.3-70b-versatile',
+                    messages: [
+                        { role: 'system', content: promptFokus },
+                        { role: 'user',   content: `Tampilkan data ${sheetDipilih}` }
+                    ],
+                    max_tokens : 1024,
+                    temperature: 0.7
+                },
+                { headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' } }
             );
             const jawaban = ai.data.choices[0].message.content;
-            addHistory(senderKey,'user',`Pilih menu: ${sheetDipilih}`);
-            addHistory(senderKey,'assistant',jawaban);
+            addHistory(senderKey, 'user',      `Pilih menu: ${sheetDipilih}`);
+            addHistory(senderKey, 'assistant', jawaban);
             await kirim(senderKey, jawaban);
             return;
         }
 
-        // ── 2. SAPAAN → menu ──
+        // ── 2. SAPAAN → tampilkan menu ──
         if (isSapaan(message)) {
             const menu = buildMenu(sheets, name);
             await kirim(senderKey, menu);
-            addHistory(senderKey,'assistant',menu);
+            addHistory(senderKey, 'assistant', menu);
             return;
         }
 
-        // ── 3. CATAT TRANSAKSI (admin) ──
+        // ── 3. CATAT TRANSAKSI (admin only) ──
         if (isAdmin) {
             const transaksi = deteksiTransaksi(message);
             if (transaksi) {
                 const hasil = await catatTransaksi(config.sheet, {
-                    action:'catat', sheet:transaksi.sheet, tipe:transaksi.tipe,
-                    kategori:'Umum', keterangan:transaksi.keterangan||message, nominal:transaksi.nominal
+                    action     : 'catat',
+                    sheet      : transaksi.sheet,
+                    tipe       : transaksi.tipe,
+                    kategori   : 'Umum',
+                    keterangan : transaksi.keterangan || message,
+                    nominal    : transaksi.nominal
                 });
                 const ikon  = transaksi.tipe === 'Pemasukan' ? '💰' : '💸';
                 const balas = hasil.status === 'ok'
                     ? `╔══════════════════════╗\n║  ✅  BERHASIL DICATAT  ║\n╚══════════════════════╝\n\n${ikon} *${transaksi.tipe}*\n──────────────────────\n💵 *Nominal    :* Rp ${transaksi.nominal.toLocaleString('id-ID')}\n📝 *Keterangan :* ${transaksi.keterangan||'-'}\n📅 *Waktu      :* ${new Date().toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})}\n──────────────────────\n📊 Data sudah masuk ke spreadsheet Bos!`
                     : `⚠️ Gagal catat: ${hasil.pesan}`;
                 await kirim(senderKey, balas);
-                addHistory(senderKey,'assistant',balas);
+                addHistory(senderKey, 'assistant', balas);
                 return;
             }
         }
 
         // ── 4. CHAT UMUM → AI ──
         const dataBisnis = await getSheetData(config.sheet);
-        const role = isAdmin ? 'AKSES: ADMIN. Boleh tampilkan semua data.' : 'AKSES: CUSTOMER. Rahasiakan modal dan gaji.';
+        const role = isAdmin
+            ? 'AKSES: ADMIN. Boleh tampilkan semua data.'
+            : 'AKSES: CUSTOMER. Rahasiakan modal dan gaji.';
         const systemPrompt =
 `Anda adalah "Corpo" (Corpomind), asisten AI bisnis cerdas dan friendly. Panggil pengguna "Bos".
 KEPRIBADIAN: Profesional, santai, hangat, sedikit humoris.
@@ -564,17 +671,25 @@ FORMAT (WhatsApp): Header+icon, garis ──────, field pakai icon+*labe
 DATA: ${dataBisnis}
 ${role}`;
 
-        addHistory(senderKey,'user',message);
+        addHistory(senderKey, 'user', message);
         const messages = [
-            { role:'system', content:systemPrompt },
-            ...chatHistory[senderKey].map(m => ({ role: m.role==='model'?'assistant':m.role, content:m.parts[0].text }))
+            { role: 'system', content: systemPrompt },
+            ...chatHistory[senderKey].map(m => ({
+                role   : m.role === 'model' ? 'assistant' : m.role,
+                content: m.parts[0].text
+            }))
         ];
         const ai = await axios.post('https://api.groq.com/openai/v1/chat/completions',
-            { model:'llama-3.3-70b-versatile', messages, max_tokens:1024, temperature:0.7 },
-            { headers:{ Authorization:`Bearer ${GROQ_KEY}`, 'Content-Type':'application/json' } }
+            {
+                model   : 'llama-3.3-70b-versatile',
+                messages,
+                max_tokens : 1024,
+                temperature: 0.7
+            },
+            { headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' } }
         );
         const jawaban = ai.data.choices[0].message.content;
-        addHistory(senderKey,'assistant',jawaban);
+        addHistory(senderKey, 'assistant', jawaban);
         await kirim(senderKey, jawaban);
 
     } catch (err) {
@@ -583,6 +698,8 @@ ${role}`;
     }
 });
 
+// ─── Health check ─────────────────────────────────────
 app.get('/', (req, res) => res.send(`${OWNER_NAMA} Bot LIVE ✅`));
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log(`${OWNER_NAMA} LIVE ON PORT ${PORT}`));
