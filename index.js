@@ -28,14 +28,19 @@ const pool = new Pool({
 async function initDB() {
     await pool.query(`
         CREATE TABLE IF NOT EXISTS users (
-            nomor_bot TEXT PRIMARY KEY,
-            sheet     TEXT,
-            admin     TEXT DEFAULT '',
-            nama      TEXT,
-            aktif     BOOLEAN DEFAULT true,
-            daftar    TIMESTAMPTZ DEFAULT NOW()
+            nomor_bot  TEXT PRIMARY KEY,
+            sheet      TEXT,
+            admin      TEXT DEFAULT '',
+            nama       TEXT,
+            aktif      BOOLEAN DEFAULT true,
+            daftar     TIMESTAMPTZ DEFAULT NOW(),
+            expired_at TIMESTAMPTZ DEFAULT (NOW() + INTERVAL '30 days'),
+            warned_exp BOOLEAN DEFAULT false
         )
     `);
+    // Migrasi: tambah kolom jika belum ada (untuk user lama)
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS expired_at TIMESTAMPTZ DEFAULT (NOW() + INTERVAL '30 days')`).catch(()=>{});
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS warned_exp BOOLEAN DEFAULT false`).catch(()=>{});
     await pool.query(`
         CREATE TABLE IF NOT EXISTS reg_sessions (
             sender_key TEXT PRIMARY KEY,
@@ -43,9 +48,137 @@ async function initDB() {
             updated_at TIMESTAMPTZ DEFAULT NOW()
         )
     `);
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS token_usage (
+            sender_key  TEXT PRIMARY KEY,
+            tokens_used INTEGER DEFAULT 0,
+            reset_date  DATE DEFAULT CURRENT_DATE,
+            warned      BOOLEAN DEFAULT false
+        )
+    `);
     console.log('[DB] Tabel siap.');
 }
 initDB().catch(err => console.error('[DB ERROR] initDB:', err.message));
+
+// ═══════════════════════════════════════════════════════
+//  TOKEN USAGE — Batas 500.000 token/hari per user
+// ═══════════════════════════════════════════════════════
+const TOKEN_LIMIT      = 500_000;
+const TOKEN_WARN_AT    = 450_000; // Peringatan saat tersisa ~50.000 token
+
+async function getTokenUsage(senderKey) {
+    const r = await pool.query(
+        'SELECT * FROM token_usage WHERE sender_key = $1',
+        [senderKey]
+    );
+    if (!r.rows[0]) return { tokens_used: 0, reset_date: new Date().toISOString().slice(0,10), warned: false };
+    return r.rows[0];
+}
+
+async function addTokenUsage(senderKey, tokensToAdd) {
+    const today = new Date().toISOString().slice(0,10);
+    await pool.query(`
+        INSERT INTO token_usage (sender_key, tokens_used, reset_date, warned)
+        VALUES ($1, $2, $3, false)
+        ON CONFLICT (sender_key) DO UPDATE
+        SET tokens_used = CASE
+            WHEN token_usage.reset_date < $3 THEN $2
+            ELSE token_usage.tokens_used + $2
+        END,
+        reset_date = CASE
+            WHEN token_usage.reset_date < $3 THEN $3
+            ELSE token_usage.reset_date
+        END,
+        warned = CASE
+            WHEN token_usage.reset_date < $3 THEN false
+            ELSE token_usage.warned
+        END
+    `, [senderKey, tokensToAdd, today]);
+}
+
+async function setWarned(senderKey) {
+    await pool.query(
+        'UPDATE token_usage SET warned = true WHERE sender_key = $1',
+        [senderKey]
+    );
+}
+
+// Estimasi token: ~1 token ≈ 4 karakter (perkiraan kasar)
+function estimasiToken(text) {
+    return Math.ceil((text || '').length / 4);
+}
+
+// ═══════════════════════════════════════════════════════
+//  LANGGANAN — Timer 30 hari per user
+// ═══════════════════════════════════════════════════════
+function pesanPeringatanExpired(sisaHari, expiredAt) {
+    const tgl = new Date(expiredAt).toLocaleDateString('id-ID', { day:'numeric', month:'long', year:'numeric' });
+    return `\n⏰ *Peringatan Langganan*\nLangganan kamu akan berakhir dalam *${sisaHari} hari* (${tgl}).\n\nSegera perpanjang agar bot tetap aktif!\n📱 Hubungi: *+62 822-4040-0388*\n🔗 ${OWNER_WA_LINK}\n`;
+}
+
+function pesanExpired() {
+    return `╔══════════════════════╗\n║  ⛔  LANGGANAN HABIS  ║\n╚══════════════════════╝\n\nMaaf, masa langganan kamu sudah berakhir 😔\n\nUntuk melanjutkan menggunakan Corpo, silakan perpanjang langganan:\n\n📱 *+62 822-4040-0388*\n🔗 ${OWNER_WA_LINK}\n\n━━━━━━━━━━━━━━━━━━━━━━\n_Terima kasih sudah menggunakan Corpo!_ 🤖`;
+}
+
+// Cron harian — cek langganan hampir habis & yang sudah expired
+async function cekLanggananHarian() {
+    try {
+        const now = new Date();
+
+        // 1. Kirim peringatan user yang expire dalam 3 hari dan belum diperingatkan
+        const hampirHabis = await pool.query(`
+            SELECT nomor_bot, nama, admin, expired_at
+            FROM users
+            WHERE aktif = true
+              AND warned_exp = false
+              AND expired_at BETWEEN NOW() AND NOW() + INTERVAL '3 days'
+        `);
+        for (const user of hampirHabis.rows) {
+            const sisaHari = Math.ceil((new Date(user.expired_at) - now) / (1000 * 60 * 60 * 24));
+            const target   = user.admin || user.nomor_bot;
+            await kirim(target, pesanPeringatanExpired(sisaHari, user.expired_at));
+            await pool.query(`UPDATE users SET warned_exp = true WHERE nomor_bot = $1`, [user.nomor_bot]);
+            console.log(`[CRON] Peringatan exp dikirim ke ${target} (${user.nama}), sisa ${sisaHari} hari`);
+        }
+
+        // 2. Nonaktifkan user yang sudah expired
+        const expired = await pool.query(`
+            SELECT nomor_bot, nama, admin
+            FROM users
+            WHERE aktif = true AND expired_at < NOW()
+        `);
+        for (const user of expired.rows) {
+            await pool.query(`UPDATE users SET aktif = false WHERE nomor_bot = $1`, [user.nomor_bot]);
+            const target = user.admin || user.nomor_bot;
+            await kirim(target, pesanExpired());
+            // Notif owner
+            await kirim(OWNER_NOMOR,
+`🔔 *Langganan Habis*\n\n┌──────────────────────\n┃ 🏢 *Bisnis :* ${user.nama}\n┃ 📱 *Bot    :* ${user.nomor_bot}\n┃ 📞 *Admin  :* ${user.admin||'-'}\n└──────────────────────\nUser sudah dinonaktifkan otomatis.`);
+            console.log(`[CRON] User ${user.nomor_bot} (${user.nama}) dinonaktifkan — expired`);
+        }
+    } catch (err) {
+        console.error('[CRON ERROR]', err.message);
+    }
+}
+
+// Jalankan cron setiap jam 00:05 WIB (UTC+7 → UTC 17:05)
+function jadwalkanCron() {
+    const jalankanCronHarian = () => {
+        const now  = new Date();
+        // Target: 00:05 WIB = 17:05 UTC
+        const next = new Date(now);
+        next.setUTCHours(17, 5, 0, 0);
+        if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+        const delay = next - now;
+        console.log(`[CRON] Cek langganan berikutnya: ${next.toISOString()} (${Math.round(delay/60000)} menit lagi)`);
+        setTimeout(() => {
+            cekLanggananHarian();
+            setInterval(cekLanggananHarian, 24 * 60 * 60 * 1000);
+        }, delay);
+    };
+    jalankanCronHarian();
+}
+
 
 // ── CRUD users ──────────────────────────────
 async function getUser(nomorBot) {
@@ -55,8 +188,8 @@ async function getUser(nomorBot) {
 
 async function saveUser(nomorBot, data) {
     await pool.query(`
-        INSERT INTO users (nomor_bot, sheet, admin, nama, aktif, daftar)
-        VALUES ($1, $2, $3, $4, $5, NOW())
+        INSERT INTO users (nomor_bot, sheet, admin, nama, aktif, daftar, expired_at, warned_exp)
+        VALUES ($1, $2, $3, $4, $5, NOW(), NOW() + INTERVAL '30 days', false)
         ON CONFLICT (nomor_bot) DO UPDATE
         SET sheet = $2, admin = $3, nama = $4, aktif = $5
     `, [nomorBot, data.sheet, data.admin || '', data.nama, data.aktif]);
@@ -199,7 +332,20 @@ _Contoh: ketik *"1"* untuk ${sheets[0] || 'menu pertama'}_
 🕐 Siap melayani 24 jam!`;
 }
 
-function isSapaan(msg) {
+function pesanInfoToken() {
+    return `\nℹ️ *Info Penggunaan*\nBatas pemakaian harian kamu setara dengan sekitar 400.000 – 500.000 kata.\nItu kira-kira setara dengan ratusan percakapan normal 💬\nGunakan dengan bijak ya supaya tidak cepat habis 🙏\n`;
+}
+
+function pesanPeringatanToken(sisaToken) {
+    const sisaKata = Math.floor(sisaToken / 1.25).toLocaleString('id-ID');
+    return `\n⚠️ *Peringatan Kuota*\nKuota harian kamu hampir habis!\nSisa kira-kira *${sisaKata} kata* lagi hari ini.\nBesok kuota akan otomatis direset 🔄\n`;
+}
+
+function pesanHabisToken() {
+    return `╔══════════════════════╗\n║  ⛔  KUOTA HABIS!    ║\n╚══════════════════════╝\n\nMaaf, kuota harian kamu sudah habis hari ini 😔\n\nKuota akan direset otomatis besok pagi.\n\n━━━━━━━━━━━━━━━━━━━━━━\n_Terima kasih sudah menggunakan Corpo!_ 🤖`;
+}
+
+
     msg = msg.trim();
     if (/^\d+$/.test(msg)) return false;
     if (msg.length <= 3)   return true;
@@ -588,6 +734,36 @@ _Bisnis lebih pintar dimulai dari satu pesan_ 💡`);
         const isAdmin = senderKey === config.admin || senderKey.includes(config.admin);
         const sheets  = await getSheetNames(config.sheet);
 
+        // ── CEK MASA LANGGANAN ──
+        if (config.expired_at && new Date(config.expired_at) < new Date()) {
+            // Nonaktifkan jika belum
+            if (config.aktif) {
+                await pool.query(`UPDATE users SET aktif = false WHERE nomor_bot = $1`, [deviceKey]);
+            }
+            await kirim(senderKey, pesanExpired());
+            return;
+        }
+
+        // Cek apakah perlu kirim peringatan expired (3 hari sebelum) saat user aktif chat
+        if (config.expired_at && !config.warned_exp) {
+            const sisaMs   = new Date(config.expired_at) - new Date();
+            const sisaHari = Math.ceil(sisaMs / (1000 * 60 * 60 * 24));
+            if (sisaHari <= 3 && sisaHari > 0) {
+                await kirim(senderKey, pesanPeringatanExpired(sisaHari, config.expired_at));
+                await pool.query(`UPDATE users SET warned_exp = true WHERE nomor_bot = $1`, [deviceKey]);
+            }
+        }
+
+        // ── CEK TOKEN USAGE ──
+        const usage   = await getTokenUsage(senderKey);
+        const today   = new Date().toISOString().slice(0,10);
+        const tokensHariIni = usage.reset_date === today ? usage.tokens_used : 0;
+
+        if (tokensHariIni >= TOKEN_LIMIT) {
+            await kirim(senderKey, pesanHabisToken());
+            return;
+        }
+
         // ── 1. PILIH MENU ANGKA ──
         const sheetDipilih = deteksiPilihMenu(message, sheets);
         if (sheetDipilih) {
@@ -622,17 +798,36 @@ ${role}`;
                 { headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' } }
             );
             const jawaban = ai.data.choices[0].message.content;
+
+            // Hitung & simpan token
+            const tokensRequest  = estimasiToken(promptFokus) + estimasiToken(`Tampilkan data ${sheetDipilih}`);
+            const tokensResponse = estimasiToken(jawaban);
+            const tokensTotal    = tokensRequest + tokensResponse;
+            await addTokenUsage(senderKey, tokensTotal);
+
+            // Cek apakah perlu peringatan hampir habis
+            const usageSetelah = tokensHariIni + tokensTotal;
+            let pesanAkhir     = jawaban;
+            if (usageSetelah >= TOKEN_WARN_AT && !usage.warned) {
+                pesanAkhir += '\n' + pesanPeringatanToken(TOKEN_LIMIT - usageSetelah);
+                await setWarned(senderKey);
+            }
+
             addHistory(senderKey, 'user',      `Pilih menu: ${sheetDipilih}`);
             addHistory(senderKey, 'assistant', jawaban);
-            await kirim(senderKey, jawaban);
+            await kirim(senderKey, pesanAkhir);
             return;
         }
 
-        // ── 2. SAPAAN → tampilkan menu ──
+        // ── 2. SAPAAN → tampilkan menu + info token (hanya jika belum pernah dapat info hari ini) ──
         if (isSapaan(message)) {
-            const menu = buildMenu(sheets, name);
-            await kirim(senderKey, menu);
-            addHistory(senderKey, 'assistant', menu);
+            const menu   = buildMenu(sheets, name);
+            const isNew  = (usage.reset_date !== today) || (tokensHariIni === 0 && !usage.warned);
+            const balasan = isNew ? pesanInfoToken() + '\n' + menu : menu;
+            await kirim(senderKey, balasan);
+            addHistory(senderKey, 'assistant', balasan);
+            // Hitung token sapaan (kecil, pakai estimasi)
+            await addTokenUsage(senderKey, estimasiToken(balasan));
             return;
         }
 
@@ -689,8 +884,23 @@ ${role}`;
             { headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' } }
         );
         const jawaban = ai.data.choices[0].message.content;
+
+        // Hitung & simpan token
+        const tokensRequest2  = messages.reduce((acc, m) => acc + estimasiToken(typeof m.content === 'string' ? m.content : ''), 0);
+        const tokensResponse2 = estimasiToken(jawaban);
+        const tokensTotal2    = tokensRequest2 + tokensResponse2;
+        await addTokenUsage(senderKey, tokensTotal2);
+
+        // Cek apakah perlu peringatan hampir habis
+        const usageSetelah2 = tokensHariIni + tokensTotal2;
+        let pesanAkhir2     = jawaban;
+        if (usageSetelah2 >= TOKEN_WARN_AT && !usage.warned) {
+            pesanAkhir2 += '\n' + pesanPeringatanToken(TOKEN_LIMIT - usageSetelah2);
+            await setWarned(senderKey);
+        }
+
         addHistory(senderKey, 'assistant', jawaban);
-        await kirim(senderKey, jawaban);
+        await kirim(senderKey, pesanAkhir2);
 
     } catch (err) {
         console.error('[ERROR]', err.message);
@@ -733,4 +943,7 @@ app.get('/admin/adduser', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`${OWNER_NAMA} LIVE ON PORT ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`${OWNER_NAMA} LIVE ON PORT ${PORT}`);
+    jadwalkanCron();
+});
