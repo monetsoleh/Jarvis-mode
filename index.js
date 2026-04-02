@@ -701,5 +701,36 @@ ${role}`;
 // ─── Health check ─────────────────────────────────────
 app.get('/', (req, res) => res.send(`${OWNER_NAMA} Bot LIVE ✅`));
 
+// ─── Admin: tambah user manual (tanpa bayar) ──────────
+// Akses: /admin/adduser?secret=xxx&nomor=xxx&admin=xxx&nama=xxx&sheet=xxx
+app.get('/admin/adduser', async (req, res) => {
+    const { secret, nomor, admin, nama, sheet } = req.query;
+
+    // Ganti 'rahasiakamu123' dengan password kamu sendiri
+    if (secret !== 'Versacy94') {
+        return res.status(401).send('❌ Unauthorized');
+    }
+    if (!nomor || !sheet) {
+        return res.status(400).send('❌ Parameter nomor dan sheet wajib diisi');
+    }
+
+    try {
+        await saveUser(nomor, {
+            sheet: sheet,
+            admin: admin || nomor,
+            nama : nama  || 'Owner',
+            aktif: true
+        });
+        res.send(`✅ User berhasil ditambahkan!<br><br>
+            <b>Nomor Bot:</b> ${nomor}<br>
+            <b>Admin:</b> ${admin || nomor}<br>
+            <b>Nama:</b> ${nama || 'Owner'}<br>
+            <b>Sheet:</b> ${sheet}`);
+    } catch (err) {
+        console.error('[ADDUSER ERROR]', err.message);
+        res.status(500).send('❌ Gagal: ' + err.message);
+    }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log(`${OWNER_NAMA} LIVE ON PORT ${PORT}`));
