@@ -187,12 +187,21 @@ async function getUser(nomorBot) {
 }
 
 async function saveUser(nomorBot, data) {
-    await pool.query(`
-        INSERT INTO users (nomor_bot, sheet, admin, nama, aktif, daftar, expired_at, warned_exp)
-        VALUES ($1, $2, $3, $4, $5, NOW(), NOW() + INTERVAL '30 days', false)
-        ON CONFLICT (nomor_bot) DO UPDATE
-        SET sheet = $2, admin = $3, nama = $4, aktif = $5
-    `, [nomorBot, data.sheet, data.admin || '', data.nama, data.aktif]);
+    await pool.query(
+        `INSERT INTO users (nomor_bot, sheet, admin, nama, aktif, daftar, expired_at, warned_exp)
+         VALUES ($1, $2, $3, $4, $5, NOW(), NOW() + INTERVAL '30 days', false)
+         ON CONFLICT (nomor_bot) DO UPDATE
+         SET sheet      = $2,
+             admin      = $3,
+             nama       = $4,
+             aktif      = $5,
+             warned_exp = false,
+             expired_at = CASE
+                 WHEN users.expired_at > NOW() THEN users.expired_at + INTERVAL '30 days'
+                 ELSE NOW() + INTERVAL '30 days'
+             END`,
+        [nomorBot, data.sheet, data.admin || '', data.nama, data.aktif]
+    );
 }
 
 // ── CRUD reg_sessions ────────────────────────
@@ -606,10 +615,16 @@ app.post('/payment/callback', async (req, res) => {
         aktif: true
     });
 
+    // Ambil expired_at yang baru tersimpan dari DB
+    const userBaru    = await getUser(sess.nomorBot);
+    const expiredAt   = userBaru?.expired_at ? new Date(userBaru.expired_at) : new Date(Date.now() + 30*24*60*60*1000);
+    const tglAktif    = new Date().toLocaleDateString('id-ID', { day:'numeric', month:'long', year:'numeric' });
+    const tglExpired  = expiredAt.toLocaleDateString('id-ID', { day:'numeric', month:'long', year:'numeric' });
+
     // Hapus sesi pendaftaran
     await deleteSession(senderKey);
 
-    console.log(`[REGISTRASI SUKSES] nomor: ${sess.nomorBot} | bisnis: ${sess.nama}`);
+    console.log(`[REGISTRASI SUKSES] nomor: ${sess.nomorBot} | bisnis: ${sess.nama} | expired: ${tglExpired}`);
 
     // Notif ke pendaftar
     await kirim(senderKey,
@@ -617,13 +632,14 @@ app.post('/payment/callback', async (req, res) => {
 ║  ✅  PEMBAYARAN OK!  ║
 ╚══════════════════════╝
 
-Yeay! Pembayaran berhasil 🎉
-*Akun Corpo Anda sudah AKTIF!*
+Terima kasih telah berlangganan Corpo! 🙏🎉
+Pembayaran kamu berhasil diterima dan akun sudah *AKTIF*!
 
 ┌──────────────────────
-┃ 🏢 *Bisnis :* ${sess.nama}
-┃ 📱 *Bot    :* ${sess.nomorBot}
-┃ 📅 *Aktif  :* ${new Date().toLocaleDateString('id-ID')}
+┃ 🏢 *Bisnis  :* ${sess.nama}
+┃ 📱 *Bot     :* ${sess.nomorBot}
+┃ 📅 *Aktif   :* ${tglAktif}
+┃ ⏳ *Expired :* ${tglExpired}
 └──────────────────────
 
 *Langkah selanjutnya:*
@@ -634,7 +650,7 @@ Yeay! Pembayaran berhasil 🎉
 🔗 ${OWNER_WA_LINK}
 
 ━━━━━━━━━━━━━━━━━━━━━━
-Terima kasih sudah bergabung! 🚀
+Selamat berbisnis lebih cerdas! 🚀
 _Powered by ${OWNER_NAMA}_ 🤖`);
 
     // Notif ke owner
@@ -699,7 +715,7 @@ app.post('/webhook', async (req, res) => {
         // ── Ambil config user dari DB ──
         const config = await getUser(deviceKey);
 
-        // Nomor belum terdaftar / tidak aktif
+        // Nomor belum terdaftar / tidak aktif — BLOKIR SEMUA PESAN, arahkan bayar
         if (!config || !config.sheet || !config.aktif) {
             await kirim(senderKey,
 `╔══════════════════════╗
@@ -707,28 +723,26 @@ app.post('/webhook', async (req, res) => {
 ║  Asisten AI Bisnis   ║
 ╚══════════════════════╝
 
-Halo! 👋 Selamat datang di *${OWNER_NAMA}*!
+⛔ *Akses Ditolak*
 
-Saya *Corpo* — Asisten AI Bisnis yang siap membuat usaha Anda lebih *cerdas & efisien* 🚀
+Nomor ini belum terdaftar atau belum aktif.
+Bot tidak dapat digunakan sebelum melakukan pembayaran langganan.
 
-*✨ Dengan Corpo, Anda bisa:*
+━━━━━━━━━━━━━━━━━━━━━━
+*💳 Cara Berlangganan:*
 ┌──────────────────────
-┃ 📦  Cek stok real-time
-┃ 📊  Pantau data bisnis
-┃ 👥  Monitor absensi
-┃ 💸  Catat transaksi
-┃ 💬  Semua via WhatsApp!
+┃ 💰 *Harga :* Rp 50.000 / bulan
+┃ ✅ *Aktif :* Otomatis setelah bayar
 └──────────────────────
 
-*🎯 Daftar sekarang, ketik:*
-👉 *daftar*
+Ketik *daftar* untuk mulai pendaftaran
+atau hubungi kami langsung:
 
-Atau hubungi kami:
 📱 *+62 822-4040-0388*
 🔗 ${OWNER_WA_LINK}
 
 ━━━━━━━━━━━━━━━━━━━━━━
-_Bisnis lebih pintar dimulai dari satu pesan_ 💡`);
+_Daftar sekarang, bisnis makin cerdas!_ 🚀`);
             return;
         }
 
