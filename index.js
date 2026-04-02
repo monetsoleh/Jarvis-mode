@@ -611,7 +611,7 @@ DATA: ${dataBisnis}
 ${role}`;
             const ai = await axios.post('https://api.groq.com/openai/v1/chat/completions',
                 {
-                    model   : 'llama-3.3-70b-versatile',
+                    model   : 'llama-3.1-8b-instant',
                     messages: [
                         { role: 'system', content: promptFokus },
                         { role: 'user',   content: `Tampilkan data ${sheetDipilih}` }
@@ -681,7 +681,7 @@ ${role}`;
         ];
         const ai = await axios.post('https://api.groq.com/openai/v1/chat/completions',
             {
-                model   : 'llama-3.3-70b-versatile',
+                model   : 'llama-3.1-8b-instant',
                 messages,
                 max_tokens : 1024,
                 temperature: 0.7
