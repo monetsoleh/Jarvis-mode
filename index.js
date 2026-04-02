@@ -18,7 +18,7 @@ const BASE_URL      = process.env.BASE_URL || 'https://jarvis-mode-production.up
 const HARGA         = 50000;
 
 // ═══════════════════════════════════════════════════════
-//  POSTGRESQL — Railway auto-set DATABASE_URL
+//  POSTGRESQL
 // ═══════════════════════════════════════════════════════
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -38,7 +38,6 @@ async function initDB() {
             warned_exp BOOLEAN DEFAULT false
         )
     `);
-    // Migrasi: tambah kolom jika belum ada (untuk user lama)
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS expired_at TIMESTAMPTZ DEFAULT (NOW() + INTERVAL '30 days')`).catch(()=>{});
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS warned_exp BOOLEAN DEFAULT false`).catch(()=>{});
     await pool.query(`
@@ -61,16 +60,13 @@ async function initDB() {
 initDB().catch(err => console.error('[DB ERROR] initDB:', err.message));
 
 // ═══════════════════════════════════════════════════════
-//  TOKEN USAGE — Batas 500.000 token/hari per user
+//  TOKEN USAGE
 // ═══════════════════════════════════════════════════════
-const TOKEN_LIMIT      = 500_000;
-const TOKEN_WARN_AT    = 450_000; // Peringatan saat tersisa ~50.000 token
+const TOKEN_LIMIT   = 500_000;
+const TOKEN_WARN_AT = 450_000;
 
 async function getTokenUsage(senderKey) {
-    const r = await pool.query(
-        'SELECT * FROM token_usage WHERE sender_key = $1',
-        [senderKey]
-    );
+    const r = await pool.query('SELECT * FROM token_usage WHERE sender_key = $1', [senderKey]);
     if (!r.rows[0]) return { tokens_used: 0, reset_date: new Date().toISOString().slice(0,10), warned: false };
     return r.rows[0];
 }
@@ -97,19 +93,15 @@ async function addTokenUsage(senderKey, tokensToAdd) {
 }
 
 async function setWarned(senderKey) {
-    await pool.query(
-        'UPDATE token_usage SET warned = true WHERE sender_key = $1',
-        [senderKey]
-    );
+    await pool.query('UPDATE token_usage SET warned = true WHERE sender_key = $1', [senderKey]);
 }
 
-// Estimasi token: ~1 token ≈ 4 karakter (perkiraan kasar)
 function estimasiToken(text) {
     return Math.ceil((text || '').length / 4);
 }
 
 // ═══════════════════════════════════════════════════════
-//  LANGGANAN — Timer 30 hari per user
+//  LANGGANAN
 // ═══════════════════════════════════════════════════════
 function pesanPeringatanExpired(sisaHari, expiredAt) {
     const tgl = new Date(expiredAt).toLocaleDateString('id-ID', { day:'numeric', month:'long', year:'numeric' });
@@ -120,17 +112,12 @@ function pesanExpired() {
     return `╔══════════════════════╗\n║  ⛔  LANGGANAN HABIS  ║\n╚══════════════════════╝\n\nMaaf, masa langganan kamu sudah berakhir 😔\n\nUntuk melanjutkan menggunakan Corpo, silakan perpanjang langganan:\n\n📱 *+62 822-4040-0388*\n🔗 ${OWNER_WA_LINK}\n\n━━━━━━━━━━━━━━━━━━━━━━\n_Terima kasih sudah menggunakan Corpo!_ 🤖`;
 }
 
-// Cron harian — cek langganan hampir habis & yang sudah expired
 async function cekLanggananHarian() {
     try {
         const now = new Date();
-
-        // 1. Kirim peringatan user yang expire dalam 3 hari dan belum diperingatkan
         const hampirHabis = await pool.query(`
-            SELECT nomor_bot, nama, admin, expired_at
-            FROM users
-            WHERE aktif = true
-              AND warned_exp = false
+            SELECT nomor_bot, nama, admin, expired_at FROM users
+            WHERE aktif = true AND warned_exp = false
               AND expired_at BETWEEN NOW() AND NOW() + INTERVAL '3 days'
         `);
         for (const user of hampirHabis.rows) {
@@ -138,47 +125,37 @@ async function cekLanggananHarian() {
             const target   = user.admin || user.nomor_bot;
             await kirim(target, pesanPeringatanExpired(sisaHari, user.expired_at));
             await pool.query(`UPDATE users SET warned_exp = true WHERE nomor_bot = $1`, [user.nomor_bot]);
-            console.log(`[CRON] Peringatan exp dikirim ke ${target} (${user.nama}), sisa ${sisaHari} hari`);
         }
-
-        // 2. Nonaktifkan user yang sudah expired
         const expired = await pool.query(`
-            SELECT nomor_bot, nama, admin
-            FROM users
+            SELECT nomor_bot, nama, admin FROM users
             WHERE aktif = true AND expired_at < NOW()
         `);
         for (const user of expired.rows) {
             await pool.query(`UPDATE users SET aktif = false WHERE nomor_bot = $1`, [user.nomor_bot]);
             const target = user.admin || user.nomor_bot;
             await kirim(target, pesanExpired());
-            // Notif owner
             await kirim(OWNER_NOMOR,
 `🔔 *Langganan Habis*\n\n┌──────────────────────\n┃ 🏢 *Bisnis :* ${user.nama}\n┃ 📱 *Bot    :* ${user.nomor_bot}\n┃ 📞 *Admin  :* ${user.admin||'-'}\n└──────────────────────\nUser sudah dinonaktifkan otomatis.`);
-            console.log(`[CRON] User ${user.nomor_bot} (${user.nama}) dinonaktifkan — expired`);
         }
     } catch (err) {
         console.error('[CRON ERROR]', err.message);
     }
 }
 
-// Jalankan cron setiap jam 00:05 WIB (UTC+7 → UTC 17:05)
 function jadwalkanCron() {
-    const jalankanCronHarian = () => {
+    const jalankan = () => {
         const now  = new Date();
-        // Target: 00:05 WIB = 17:05 UTC
         const next = new Date(now);
         next.setUTCHours(17, 5, 0, 0);
         if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
         const delay = next - now;
-        console.log(`[CRON] Cek langganan berikutnya: ${next.toISOString()} (${Math.round(delay/60000)} menit lagi)`);
         setTimeout(() => {
             cekLanggananHarian();
             setInterval(cekLanggananHarian, 24 * 60 * 60 * 1000);
         }, delay);
     };
-    jalankanCronHarian();
+    jalankan();
 }
-
 
 // ── CRUD users ──────────────────────────────
 async function getUser(nomorBot) {
@@ -191,11 +168,7 @@ async function saveUser(nomorBot, data) {
         `INSERT INTO users (nomor_bot, sheet, admin, nama, aktif, daftar, expired_at, warned_exp)
          VALUES ($1, $2, $3, $4, $5, NOW(), NOW() + INTERVAL '30 days', false)
          ON CONFLICT (nomor_bot) DO UPDATE
-         SET sheet      = $2,
-             admin      = $3,
-             nama       = $4,
-             aktif      = $5,
-             warned_exp = false,
+         SET sheet = $2, admin = $3, nama = $4, aktif = $5, warned_exp = false,
              expired_at = CASE
                  WHEN users.expired_at > NOW() THEN users.expired_at + INTERVAL '30 days'
                  ELSE NOW() + INTERVAL '30 days'
@@ -212,8 +185,7 @@ async function getSession(senderKey) {
 
 async function setSession(senderKey, data) {
     await pool.query(`
-        INSERT INTO reg_sessions (sender_key, data, updated_at)
-        VALUES ($1, $2, NOW())
+        INSERT INTO reg_sessions (sender_key, data, updated_at) VALUES ($1, $2, NOW())
         ON CONFLICT (sender_key) DO UPDATE SET data = $2, updated_at = NOW()
     `, [senderKey, JSON.stringify(data)]);
 }
@@ -223,44 +195,21 @@ async function deleteSession(senderKey) {
 }
 
 // ═══════════════════════════════════════════════════════
-//  MUSTIKPAY HELPER
-//  Docs v1.6 — Base URL: https://mustikapayment.com
-//  Auth    : X-Api-Key header
-//  POST    : application/x-www-form-urlencoded
-//  Webhook : POST JSON → { status, service, amount,
-//            reference, order_id, timestamp,
-//            data: { ref_no, amount, issuer, rrn } }
+//  MUSTIKPAY
 // ═══════════════════════════════════════════════════════
 const MUSTIKA_BASE = 'https://mustikapayment.com';
 
 async function createQRIS(amount, customerName = 'Pelanggan', productName = 'Berlangganan Corpo') {
     const res = await axios.post(
         `${MUSTIKA_BASE}/api/createpay`,
-        new URLSearchParams({
-            amount       : String(amount),
-            product_name : productName,
-            customer_name: customerName,
-            redirect_url : `${BASE_URL}/payment/success`
-        }),
-        {
-            headers: {
-                'X-Api-Key'   : MUSTIKA_API_KEY,
-                'Content-Type': 'application/x-www-form-urlencoded'
-            }
-        }
+        new URLSearchParams({ amount: String(amount), product_name: productName, customer_name: customerName, redirect_url: `${BASE_URL}/payment/success` }),
+        { headers: { 'X-Api-Key': MUSTIKA_API_KEY, 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
-    // Response: { status, ref_no, qr_content, qr_url, payment_link, amount }
     return res.data;
 }
 
 async function cekStatusQRIS(refNo) {
-    const res = await axios.get(
-        `${MUSTIKA_BASE}/api/cekpay`,
-        {
-            params : { ref_no: refNo },
-            headers: { 'X-Api-Key': MUSTIKA_API_KEY }
-        }
-    );
+    const res = await axios.get(`${MUSTIKA_BASE}/api/cekpay`, { params: { ref_no: refNo }, headers: { 'X-Api-Key': MUSTIKA_API_KEY } });
     return res.data;
 }
 
@@ -341,6 +290,64 @@ _Contoh: ketik *"1"* untuk ${sheets[0] || 'menu pertama'}_
 🕐 Siap melayani 24 jam!`;
 }
 
+// ─── Sambutan untuk pengguna BELUM DAFTAR ────────────
+// Tampil untuk semua pesan pertama, termasuk "menu" dan "batal"
+function pesanSambutanBelumDaftar(namaUser) {
+    return `╔══════════════════════╗
+║   🤖  *C O R P O*   ║
+║  Asisten AI Bisnis   ║
+╚══════════════════════╝
+
+Halo${namaUser ? ', *' + namaUser + '*' : ''} 👋
+Selamat datang di *Corpo* — Asisten AI untuk bisnis Anda! 🚀
+
+━━━━━━━━━━━━━━━━━━━━━━
+*📌 Apa yang bisa Corpo lakukan?*
+┌──────────────────────
+┃ 📊 Baca data dari Google Spreadsheet Anda
+┃ 💬 Jawab pertanyaan seputar bisnis Anda
+┃ 💸 Catat transaksi pemasukan & pengeluaran
+┃ 🤖 Siap melayani pelanggan 24 jam
+└──────────────────────
+
+*💳 Harga:* Rp 50.000 / bulan
+✅ Akun aktif otomatis setelah pembayaran
+
+━━━━━━━━━━━━━━━━━━━━━━
+*Ketik perintah berikut untuk mulai:*
+┌──────────────────────
+┃ 📝 *daftar* → Mulai proses pendaftaran
+└──────────────────────
+
+Atau hubungi kami langsung:
+📱 *+62 822-4040-0388*
+🔗 ${OWNER_WA_LINK}`;
+}
+
+// ─── Sambutan untuk pengguna SUDAH DAFTAR ────────────
+// Tampil saat sapaan atau setelah "batal"
+function pesanSambutanSudahDaftar(namaUser) {
+    return `╔══════════════════════╗
+║   🤖  *C O R P O*   ║
+║  Asisten AI Bisnis   ║
+╚══════════════════════╝
+
+Halo${namaUser ? ', *' + namaUser + '*' : ''} 👋
+Selamat datang kembali! Ada yang bisa Corpo bantu? 💼
+
+━━━━━━━━━━━━━━━━━━━━━━
+*Pilih perintah di bawah:*
+┌──────────────────────
+┃ 📋 *menu*  → Lihat & akses data bisnis Anda
+┃             dari Google Spreadsheet
+┃
+┃ ❌ *batal* → Kembali ke halaman ini
+┃             (batalkan proses aktif)
+└──────────────────────
+
+Atau langsung ketik pertanyaan bisnis Anda! 💬`;
+}
+
 function pesanInfoToken() {
     return `\nℹ️ *Info Penggunaan*\nBatas pemakaian harian kamu setara dengan sekitar 400.000 – 500.000 kata.\nItu kira-kira setara dengan ratusan percakapan normal 💬\nGunakan dengan bijak ya supaya tidak cepat habis 🙏\n`;
 }
@@ -354,12 +361,11 @@ function pesanHabisToken() {
     return `╔══════════════════════╗\n║  ⛔  KUOTA HABIS!    ║\n╚══════════════════════╝\n\nMaaf, kuota harian kamu sudah habis hari ini 😔\n\nKuota akan direset otomatis besok pagi.\n\n━━━━━━━━━━━━━━━━━━━━━━\n_Terima kasih sudah menggunakan Corpo!_ 🤖`;
 }
 
-
 function isSapaan(msg) {
     msg = msg.trim();
     if (/^\d+$/.test(msg)) return false;
     if (msg.length <= 3)   return true;
-    return /^(halo|hai|hi|hei|oi|ping|assalam|selamat|pagi|siang|sore|malam|menu|help|bantuan|start|mulai|hallo|hello|hey|corpo|corpomind|bot|test|tes|coba|buka|open)\b/i.test(msg);
+    return /^(halo|hai|hi|hei|oi|ping|assalam|selamat|pagi|siang|sore|malam|help|bantuan|start|mulai|hallo|hello|hey|corpo|corpomind|bot|test|tes|coba|buka|open)\b/i.test(msg);
 }
 
 function deteksiPilihMenu(message, sheets) {
@@ -396,7 +402,7 @@ function deteksiTransaksi(message) {
 }
 
 // ═══════════════════════════════════════════════════════
-//  HISTORY CHAT (in-memory, tidak kritis jika hilang)
+//  HISTORY CHAT (in-memory)
 // ═══════════════════════════════════════════════════════
 const chatHistory = {};
 const MAX_HISTORY = 10;
@@ -424,10 +430,10 @@ async function handleRegistrasi(senderKey, message, name) {
     const msg  = message.trim();
     const sess = await getSession(senderKey);
 
-    // Batalkan sesi
+    // Batalkan sesi registrasi yang sedang berjalan
     if (sess && /^(batal|cancel|stop)$/i.test(msg)) {
         await deleteSession(senderKey);
-        await kirim(senderKey, '❌ Pendaftaran dibatalkan. Ketik *daftar* kapan saja untuk memulai lagi.');
+        await kirim(senderKey, '❌ Pendaftaran dibatalkan.\n\nKetik *daftar* kapan saja untuk memulai lagi.');
         return true;
     }
 
@@ -451,6 +457,7 @@ Ketik *nama bisnis* Anda:`);
         return true;
     }
 
+    // Jika tidak ada sesi aktif dan bukan keyword daftar → tidak ditangani di sini
     if (!sess) return false;
 
     // Step 1: Nama bisnis
@@ -496,21 +503,12 @@ _https://script.google.com/macros/s/xxx/exec_
             await kirim(senderKey, '⚠️ Link tidak valid. Harus dimulai dengan *https://*');
             return true;
         }
-
-        // Simpan sheet dulu, update step ke bayar
         await setSession(senderKey, { ...sess, sheet: msg, step: 'bayar' });
-
         try {
-            // Buat QRIS — POST /api/createpay (application/x-www-form-urlencoded)
             const qris = await createQRIS(HARGA, name || 'Pelanggan', 'Berlangganan Corpo');
-
             if (qris.status !== 'success') throw new Error(qris.message || 'Gagal membuat QRIS');
-
-            // Simpan ref_no ke sesi — dipakai untuk mencocokkan webhook callback
             await setSession(senderKey, { ...sess, sheet: msg, step: 'bayar', refNo: qris.ref_no });
-
             console.log(`[DAFTAR] ${senderKey} | ref_no: ${qris.ref_no} | nomor bot: ${sess.nomorBot}`);
-
             await kirim(senderKey,
 `✅ Data berhasil disimpan!
 
@@ -534,7 +532,6 @@ Scan QRIS berikut untuk menyelesaikan:
 ━━━━━━━━━━━━━━━━━━━━━━
 ⏳ QR berlaku *30 menit*
 ✅ Akun aktif *otomatis* setelah bayar`);
-
         } catch (err) {
             console.error('[QRIS ERROR]', err.message);
             await deleteSession(senderKey);
@@ -553,80 +550,28 @@ Atau hubungi kami:
 
 // ═══════════════════════════════════════════════════════
 //  WEBHOOK MUSTIKPAY CALLBACK
-//
-//  POST payload dari Mustika (application/json):
-//  {
-//    "status"    : "success",
-//    "service"   : "QRIS",
-//    "amount"    : 10000,
-//    "reference" : "QR12345",      ← ini adalah ref_no
-//    "order_id"  : "INV123",
-//    "timestamp" : "2024-03-08 10:00:00",
-//    "data": {
-//      "ref_no"  : "QR12345",
-//      "amount"  : 10000,
-//      "issuer"  : "GOPAY",
-//      "rrn"     : "123456789012"
-//    }
-//  }
 // ═══════════════════════════════════════════════════════
 app.post('/payment/callback', async (req, res) => {
-    // Wajib balas 200 dulu sesuai docs Mustika
     res.status(200).send('OK');
     console.log('[CALLBACK] MustikaPay:', JSON.stringify(req.body));
-
     const body   = req.body;
     const status = (body.status || '').toLowerCase();
-
-    // Hanya proses jika status success
-    if (status !== 'success' && status !== 'paid') {
-        console.log('[CALLBACK] Status bukan success, diabaikan:', status);
-        return;
-    }
-
-    // Ambil ref_no: dari `reference` (root) atau `data.ref_no`
+    if (status !== 'success' && status !== 'paid') return;
     const refNo = body.reference || (body.data && body.data.ref_no) || body.ref_no;
-    if (!refNo) {
-        console.warn('[CALLBACK] ref_no tidak ditemukan di payload');
-        return;
-    }
-
-    console.log('[CALLBACK] ref_no diterima:', refNo);
-
-    // Cari sesi di DB yang memiliki refNo cocok
+    if (!refNo) return;
     const r = await pool.query(
-        `SELECT sender_key, data FROM reg_sessions WHERE data->>'refNo' = $1`,
-        [refNo]
+        `SELECT sender_key, data FROM reg_sessions WHERE data->>'refNo' = $1`, [refNo]
     );
-
-    if (!r.rows[0]) {
-        console.warn('[CALLBACK] Tidak ada sesi untuk ref_no:', refNo);
-        return;
-    }
-
+    if (!r.rows[0]) return;
     const senderKey = r.rows[0].sender_key;
     const sess      = r.rows[0].data;
-
-    // Simpan user ke PostgreSQL
-    await saveUser(sess.nomorBot, {
-        sheet: sess.sheet,
-        admin: '',
-        nama : sess.nama,
-        aktif: true
-    });
-
-    // Ambil expired_at yang baru tersimpan dari DB
-    const userBaru    = await getUser(sess.nomorBot);
-    const expiredAt   = userBaru?.expired_at ? new Date(userBaru.expired_at) : new Date(Date.now() + 30*24*60*60*1000);
-    const tglAktif    = new Date().toLocaleDateString('id-ID', { day:'numeric', month:'long', year:'numeric' });
-    const tglExpired  = expiredAt.toLocaleDateString('id-ID', { day:'numeric', month:'long', year:'numeric' });
-
-    // Hapus sesi pendaftaran
+    await saveUser(sess.nomorBot, { sheet: sess.sheet, admin: '', nama: sess.nama, aktif: true });
+    const userBaru   = await getUser(sess.nomorBot);
+    const expiredAt  = userBaru?.expired_at ? new Date(userBaru.expired_at) : new Date(Date.now() + 30*24*60*60*1000);
+    const tglAktif   = new Date().toLocaleDateString('id-ID', { day:'numeric', month:'long', year:'numeric' });
+    const tglExpired = expiredAt.toLocaleDateString('id-ID', { day:'numeric', month:'long', year:'numeric' });
     await deleteSession(senderKey);
-
     console.log(`[REGISTRASI SUKSES] nomor: ${sess.nomorBot} | bisnis: ${sess.nama} | expired: ${tglExpired}`);
-
-    // Notif ke pendaftar
     await kirim(senderKey,
 `╔══════════════════════╗
 ║  ✅  PEMBAYARAN OK!  ║
@@ -652,8 +597,6 @@ Pembayaran kamu berhasil diterima dan akun sudah *AKTIF*!
 ━━━━━━━━━━━━━━━━━━━━━━
 Selamat berbisnis lebih cerdas! 🚀
 _Powered by ${OWNER_NAMA}_ 🤖`);
-
-    // Notif ke owner
     await kirim(OWNER_NOMOR,
 `🔔 *PENDAFTAR BARU!*
 
@@ -668,7 +611,6 @@ _Powered by ${OWNER_NAMA}_ 🤖`);
 _Kirim ke bot: setadmin_${sess.nomorBot}_NOMOR_ADMIN_`);
 });
 
-// ─── Halaman sukses setelah redirect dari QRIS ───────
 app.get('/payment/success', (req, res) => {
     res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:50px">
         <h1>✅ Pembayaran Berhasil!</h1>
@@ -690,14 +632,19 @@ app.post('/webhook', async (req, res) => {
     const senderKey = normalize(sender);
 
     try {
-        // ── Cek sesi registrasi dulu ──
-        const handled = await handleRegistrasi(senderKey, message, name);
-        if (handled) return;
+        // ── Ambil config bot dari DB ──
+        const config = await getUser(deviceKey);
 
-        // ── Cek perintah owner: setadmin ──
-        if (senderKey === OWNER_NOMOR && message.startsWith('setadmin_')) {
+        // ── Tentukan apakah pengirim adalah owner atau admin terdaftar ──
+        const isOwner           = senderKey === OWNER_NOMOR;
+        const isRegisteredAdmin = config && (
+            senderKey === config.admin ||
+            senderKey === config.nomor_bot
+        );
+
+        // ── Perintah owner: setadmin (prioritas tertinggi) ──
+        if (isOwner && message.startsWith('setadmin_')) {
             const parts = message.split('_');
-            // format: setadmin_NOMORBOT_NOMORADMIN
             if (parts.length === 3) {
                 const targetBot   = parts[1];
                 const targetAdmin = parts[2];
@@ -712,38 +659,30 @@ app.post('/webhook', async (req, res) => {
             return;
         }
 
-        // ── Ambil config user dari DB ──
-        const config = await getUser(deviceKey);
-
-        // Nomor belum terdaftar / tidak aktif — BLOKIR SEMUA PESAN, arahkan bayar
+        // ── Nomor bot belum terdaftar / tidak aktif ──
         if (!config || !config.sheet || !config.aktif) {
-            await kirim(senderKey,
-`╔══════════════════════╗
-║   🤖  *C O R P O*   ║
-║  Asisten AI Bisnis   ║
-╚══════════════════════╝
+            if (isOwner) {
+                await kirim(senderKey, '⚠️ Nomor bot ini belum ada di database. Daftarkan dulu via /admin/adduser');
+                return;
+            }
 
-⛔ *Akses Ditolak*
+            // Pengirim umum yang belum daftar:
+            // Apapun yang mereka ketik (termasuk "menu", "batal") → tampilkan sambutan + arahkan daftar
+            // Kecuali jika sedang dalam sesi registrasi → proses registrasi
+            const handled = await handleRegistrasi(senderKey, message, name);
+            if (handled) return;
 
-Nomor ini belum terdaftar atau belum aktif.
-Bot tidak dapat digunakan sebelum melakukan pembayaran langganan.
-
-━━━━━━━━━━━━━━━━━━━━━━
-*💳 Cara Berlangganan:*
-┌──────────────────────
-┃ 💰 *Harga :* Rp 50.000 / bulan
-┃ ✅ *Aktif :* Otomatis setelah bayar
-└──────────────────────
-
-Ketik *daftar* untuk mulai pendaftaran
-atau hubungi kami langsung:
-
-📱 *+62 822-4040-0388*
-🔗 ${OWNER_WA_LINK}
-
-━━━━━━━━━━━━━━━━━━━━━━
-_Daftar sekarang, bisnis makin cerdas!_ 🚀`);
+            // Semua pesan lainnya → sambutan belum daftar
+            await kirim(senderKey, pesanSambutanBelumDaftar(name));
             return;
+        }
+
+        // ── Pengguna SUDAH TERDAFTAR & AKTIF ──
+
+        // Owner & admin terdaftar tidak masuk ke flow registrasi
+        if (!isOwner && !isRegisteredAdmin) {
+            const handled = await handleRegistrasi(senderKey, message, name);
+            if (handled) return;
         }
 
         const isAdmin = senderKey === config.admin || senderKey.includes(config.admin);
@@ -751,7 +690,6 @@ _Daftar sekarang, bisnis makin cerdas!_ 🚀`);
 
         // ── CEK MASA LANGGANAN ──
         if (config.expired_at && new Date(config.expired_at) < new Date()) {
-            // Nonaktifkan jika belum
             if (config.aktif) {
                 await pool.query(`UPDATE users SET aktif = false WHERE nomor_bot = $1`, [deviceKey]);
             }
@@ -759,7 +697,6 @@ _Daftar sekarang, bisnis makin cerdas!_ 🚀`);
             return;
         }
 
-        // Cek apakah perlu kirim peringatan expired (3 hari sebelum) saat user aktif chat
         if (config.expired_at && !config.warned_exp) {
             const sisaMs   = new Date(config.expired_at) - new Date();
             const sisaHari = Math.ceil(sisaMs / (1000 * 60 * 60 * 24));
@@ -770,12 +707,33 @@ _Daftar sekarang, bisnis makin cerdas!_ 🚀`);
         }
 
         // ── CEK TOKEN USAGE ──
-        const usage   = await getTokenUsage(senderKey);
-        const today   = new Date().toISOString().slice(0,10);
+        const usage         = await getTokenUsage(senderKey);
+        const today         = new Date().toISOString().slice(0,10);
         const tokensHariIni = usage.reset_date === today ? usage.tokens_used : 0;
 
         if (tokensHariIni >= TOKEN_LIMIT) {
             await kirim(senderKey, pesanHabisToken());
+            return;
+        }
+
+        const msg = message.trim().toLowerCase();
+
+        // ── BATAL → kembali ke sambutan sudah daftar ──
+        if (/^(batal|cancel|stop)$/.test(msg)) {
+            const balasan = pesanSambutanSudahDaftar(name);
+            await kirim(senderKey, balasan);
+            addHistory(senderKey, 'assistant', balasan);
+            return;
+        }
+
+        // ── MENU → tampilkan daftar spreadsheet langsung ──
+        if (/^menu$/.test(msg)) {
+            const balasan = buildMenu(sheets, name);
+            const isNew   = (usage.reset_date !== today) || (tokensHariIni === 0 && !usage.warned);
+            const kirimPesan = isNew ? pesanInfoToken() + '\n' + balasan : balasan;
+            await kirim(senderKey, kirimPesan);
+            addHistory(senderKey, 'assistant', balasan);
+            await addTokenUsage(senderKey, estimasiToken(kirimPesan));
             return;
         }
 
@@ -813,35 +771,27 @@ ${role}`;
                 { headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' } }
             );
             const jawaban = ai.data.choices[0].message.content;
-
-            // Hitung & simpan token
             const tokensRequest  = estimasiToken(promptFokus) + estimasiToken(`Tampilkan data ${sheetDipilih}`);
             const tokensResponse = estimasiToken(jawaban);
             const tokensTotal    = tokensRequest + tokensResponse;
             await addTokenUsage(senderKey, tokensTotal);
-
-            // Cek apakah perlu peringatan hampir habis
             const usageSetelah = tokensHariIni + tokensTotal;
             let pesanAkhir     = jawaban;
             if (usageSetelah >= TOKEN_WARN_AT && !usage.warned) {
                 pesanAkhir += '\n' + pesanPeringatanToken(TOKEN_LIMIT - usageSetelah);
                 await setWarned(senderKey);
             }
-
-            addHistory(senderKey, 'user',      `Pilih menu: ${sheetDipilih}`);
+            addHistory(senderKey, 'user', `Pilih menu: ${sheetDipilih}`);
             addHistory(senderKey, 'assistant', jawaban);
             await kirim(senderKey, pesanAkhir);
             return;
         }
 
-        // ── 2. SAPAAN → tampilkan menu + info token (hanya jika belum pernah dapat info hari ini) ──
+        // ── 2. SAPAAN → tampilkan sambutan sudah daftar ──
         if (isSapaan(message)) {
-            const menu   = buildMenu(sheets, name);
-            const isNew  = (usage.reset_date !== today) || (tokensHariIni === 0 && !usage.warned);
-            const balasan = isNew ? pesanInfoToken() + '\n' + menu : menu;
+            const balasan = pesanSambutanSudahDaftar(name);
             await kirim(senderKey, balasan);
             addHistory(senderKey, 'assistant', balasan);
-            // Hitung token sapaan (kecil, pakai estimasi)
             await addTokenUsage(senderKey, estimasiToken(balasan));
             return;
         }
@@ -880,7 +830,6 @@ ATURAN: Jawab sesuai yang ditanya saja. Tanya dulu jika kurang detail. Beritahu 
 FORMAT (WhatsApp): Header+icon, garis ──────, field pakai icon+*label* tebal, pisah entri ─ ─ ─, DILARANG tabel markdown.
 DATA: ${dataBisnis}
 ${role}`;
-
         addHistory(senderKey, 'user', message);
         const messages = [
             { role: 'system', content: systemPrompt },
@@ -899,21 +848,16 @@ ${role}`;
             { headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' } }
         );
         const jawaban = ai.data.choices[0].message.content;
-
-        // Hitung & simpan token
         const tokensRequest2  = messages.reduce((acc, m) => acc + estimasiToken(typeof m.content === 'string' ? m.content : ''), 0);
         const tokensResponse2 = estimasiToken(jawaban);
         const tokensTotal2    = tokensRequest2 + tokensResponse2;
         await addTokenUsage(senderKey, tokensTotal2);
-
-        // Cek apakah perlu peringatan hampir habis
         const usageSetelah2 = tokensHariIni + tokensTotal2;
         let pesanAkhir2     = jawaban;
         if (usageSetelah2 >= TOKEN_WARN_AT && !usage.warned) {
             pesanAkhir2 += '\n' + pesanPeringatanToken(TOKEN_LIMIT - usageSetelah2);
             await setWarned(senderKey);
         }
-
         addHistory(senderKey, 'assistant', jawaban);
         await kirim(senderKey, pesanAkhir2);
 
@@ -926,35 +870,30 @@ ${role}`;
 // ─── Health check ─────────────────────────────────────
 app.get('/', (req, res) => res.send(`${OWNER_NAMA} Bot LIVE ✅`));
 
-// ─── Admin: tambah user manual (tanpa bayar) ──────────
-// Akses: /admin/adduser?secret=xxx&nomor=xxx&admin=xxx&nama=xxx&sheet=xxx
+// ─── Admin: tambah user manual ────────────────────────
 app.get('/admin/adduser', async (req, res) => {
     const { secret, nomor, admin, nama, sheet } = req.query;
-
-    // Ganti 'rahasiakamu123' dengan password kamu sendiri
-    if (secret !== 'Versacy94') {
-        return res.status(401).send('❌ Unauthorized');
-    }
-    if (!nomor || !sheet) {
-        return res.status(400).send('❌ Parameter nomor dan sheet wajib diisi');
-    }
-
+    if (secret !== 'Versacy94') return res.status(401).send('❌ Unauthorized');
+    if (!nomor || !sheet) return res.status(400).send('❌ Parameter nomor dan sheet wajib diisi');
     try {
-        await saveUser(nomor, {
-            sheet: sheet,
-            admin: admin || nomor,
-            nama : nama  || 'Owner',
-            aktif: true
-        });
+        await saveUser(nomor, { sheet, admin: admin || nomor, nama: nama || 'Owner', aktif: true });
         res.send(`✅ User berhasil ditambahkan!<br><br>
             <b>Nomor Bot:</b> ${nomor}<br>
             <b>Admin:</b> ${admin || nomor}<br>
             <b>Nama:</b> ${nama || 'Owner'}<br>
             <b>Sheet:</b> ${sheet}`);
     } catch (err) {
-        console.error('[ADDUSER ERROR]', err.message);
         res.status(500).send('❌ Gagal: ' + err.message);
     }
+});
+
+// ─── Admin: hapus sesi tersangkut ─────────────────────
+app.get('/admin/clearsession', async (req, res) => {
+    const { secret, sender } = req.query;
+    if (secret !== 'Versacy94') return res.status(401).send('❌ Unauthorized');
+    if (!sender) return res.status(400).send('❌ Parameter sender wajib');
+    await deleteSession(sender);
+    res.send(`✅ Sesi untuk <b>${sender}</b> berhasil dihapus`);
 });
 
 const PORT = process.env.PORT || 3000;
