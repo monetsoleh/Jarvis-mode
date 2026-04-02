@@ -103,7 +103,13 @@ _Contoh: ketik *"1"* untuk ${sheets[0] || 'menu pertama'}_
 //  Deteksi sapaan
 // ─────────────────────────────────────────────
 function isSapaan(message) {
-    return /^(halo|hai|hi|hei|oi|p|ping|assalam|selamat|pagi|siang|sore|malam|menu|help|bantuan|start|mulai|hallo|hello|hey)\b/i.test(message.trim());
+    const msg = message.trim().toLowerCase();
+
+    // Pesan sangat pendek (1-4 karakter) → langsung anggap sapaan
+    if (msg.length <= 4) return true;
+
+    // Kata kunci sapaan eksplisit
+    return /^(halo|hai|hi|hei|oi|ping|assalam|selamat|pagi|siang|sore|malam|menu|help|bantuan|start|mulai|hallo|hello|hey|corpo|corpomind|bot|p+|h+|hei+|test|tes|coba|cobain|buka|open)\b/i.test(msg);
 }
 
 // ─────────────────────────────────────────────
