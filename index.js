@@ -3,18 +3,57 @@ const axios   = require('axios');
 const fs      = require('fs');
 const app     = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-const GROQ_KEY     = (process.env.GROQ_API_KEY  || '').trim();
-const FONNTE_TOKEN = (process.env.FONNTE_TOKEN   || '').trim();
-const MustikaPay   = require('mustikapay-node');
-const mp           = new MustikaPay();
+const GROQ_KEY        = (process.env.GROQ_API_KEY       || '').trim();
+const FONNTE_TOKEN    = (process.env.FONNTE_TOKEN        || '').trim();
+const MUSTIKA_API_KEY = (process.env.MUSTIKAPAY_API_KEY  || '').trim();
 
 // ─── Konfigurasi Owner ───────────────────────
-const OWNER_NAMA     = 'Corpomind';
-const OWNER_NOMOR    = '6282240400388';
-const OWNER_WA_LINK  = 'https://wa.me/6282240400388';
-const BASE_URL       = process.env.BASE_URL || 'https://jarvis-mode-production.up.railway.app';
-const HARGA          = 50000; // Rp 50.000
+const OWNER_NAMA    = 'Corpomind';
+const OWNER_NOMOR   = '6282240400388';
+const OWNER_WA_LINK = 'https://wa.me/6282240400388';
+const BASE_URL      = process.env.BASE_URL || 'https://jarvis-mode-production.up.railway.app';
+const HARGA         = 50000;
+
+// ─────────────────────────────────────────────
+//  MustikaPay Helper — sesuai docs v1.6
+//  Base URL   : https://mustikapayment.com
+//  Auth       : X-Api-Key header
+//  POST type  : application/x-www-form-urlencoded
+// ─────────────────────────────────────────────
+const MUSTIKA_BASE = 'https://mustikapayment.com';
+
+async function createQRIS(amount, customerName = 'Pelanggan', productName = 'Berlangganan Corpo') {
+    const res = await axios.post(
+        `${MUSTIKA_BASE}/api/createpay`,
+        new URLSearchParams({
+            amount       : String(amount),
+            product_name : productName,
+            customer_name: customerName,
+            redirect_url : `${BASE_URL}/payment/success`
+        }),
+        {
+            headers: {
+                'X-Api-Key'   : MUSTIKA_API_KEY,
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+        }
+    );
+    // Response: { status, ref_no, qr_content, qr_url, payment_link, amount }
+    return res.data;
+}
+
+async function cekStatusQRIS(refNo) {
+    const res = await axios.get(
+        `${MUSTIKA_BASE}/api/cekpay`,
+        {
+            params : { ref_no: refNo },
+            headers: { 'X-Api-Key': MUSTIKA_API_KEY }
+        }
+    );
+    return res.data;
+}
 
 // ─────────────────────────────────────────────
 //  Helpers: baca / tulis users.json
@@ -170,7 +209,7 @@ async function kirim(target, message) {
 // ═══════════════════════════════════════════════════════
 //  ALUR PENDAFTARAN VIA WHATSAPP
 // ═══════════════════════════════════════════════════════
-async function handleRegistrasi(senderKey, message) {
+async function handleRegistrasi(senderKey, message, name) {
     const msg  = message.trim();
     const sess = regSession[senderKey];
 
@@ -223,7 +262,7 @@ _Contoh: 628123456789_`);
     if (sess.step === 'nomorBot') {
         const nomor = msg.replace(/[^0-9]/g, '');
         if (nomor.length < 10) {
-            await kirim(senderKey, '⚠️ Nomor tidak valid. Masukkan nomor WA yang benar ya Bos!\n_Contoh: 628123456789_');
+            await kirim(senderKey, '⚠️ Nomor tidak valid. Masukkan nomor WA yang benar!\n_Contoh: 628123456789_');
             return true;
         }
         regSession[senderKey].nomorBot = nomor;
@@ -242,19 +281,25 @@ _https://script.google.com/macros/s/xxx/exec_
         return true;
     }
 
-    // Step 3: Link sheet
+    // Step 3: Link sheet → buat QRIS
     if (sess.step === 'sheet') {
         if (!msg.startsWith('http')) {
-            await kirim(senderKey, '⚠️ Link tidak valid. Harus dimulai dengan *https://* ya Bos!');
+            await kirim(senderKey, '⚠️ Link tidak valid. Harus dimulai dengan *https://*');
             return true;
         }
         regSession[senderKey].sheet = msg;
         regSession[senderKey].step  = 'bayar';
 
         try {
-            const qris = await mp.createQris(HARGA);
-            if (qris.status !== 'success') throw new Error(qris.message || 'Gagal buat QRIS');
+            // Buat QRIS sesuai docs v1.6 — POST /api/createpay
+            const qris = await createQRIS(HARGA, name || 'Pelanggan', 'Berlangganan Corpo');
+
+            if (qris.status !== 'success') throw new Error(qris.message || 'Gagal membuat QRIS');
+
+            // Simpan ref_no untuk dicocokkan saat webhook callback masuk
             regSession[senderKey].refNo = qris.ref_no;
+
+            console.log(`[DAFTAR] ${senderKey} | ref_no: ${qris.ref_no} | nomor bot: ${sess.nomorBot}`);
 
             await kirim(senderKey,
 `✅ Data berhasil disimpan!
@@ -267,25 +312,26 @@ _https://script.google.com/macros/s/xxx/exec_
 ┃ 📊 *Sheet     :* Tersimpan ✅
 └──────────────────────
 
-*💳 PEMBAYARAN*
+*💳 PEMBAYARAN QRIS*
 ┌──────────────────────
 ┃ 💰 *Total  :* Rp ${HARGA.toLocaleString('id-ID')}
 ┃ 🔖 *Ref No :* ${qris.ref_no}
 └──────────────────────
 
 Scan QRIS berikut untuk menyelesaikan:
-🔗 ${qris.qr_url}
+🔗 ${qris.payment_link || qris.qr_url}
 
 ━━━━━━━━━━━━━━━━━━━━━━
 ⏳ QR berlaku *30 menit*
 ✅ Akun aktif *otomatis* setelah bayar`);
+
         } catch (err) {
             console.error('[QRIS ERROR]', err.message);
             delete regSession[senderKey];
             await kirim(senderKey,
 `⚠️ Gagal membuat QRIS. Silakan coba lagi dengan ketik *daftar*
 
-Atau hubungi kami langsung:
+Atau hubungi kami:
 📱 *+62 822-4040-0388*
 🔗 ${OWNER_WA_LINK}`);
         }
@@ -297,27 +343,46 @@ Atau hubungi kami langsung:
 
 // ═══════════════════════════════════════════════════════
 //  WEBHOOK MUSTIKPAY CALLBACK
+//  Docs: POST payload berisi { status, service, amount,
+//        reference, order_id, timestamp,
+//        data: { ref_no, amount, issuer, rrn } }
 // ═══════════════════════════════════════════════════════
 app.post('/payment/callback', async (req, res) => {
-    res.status(200).send('OK');
+    res.status(200).send('OK'); // Wajib balas 200 sesuai docs
     console.log('[CALLBACK] MustikaPay:', JSON.stringify(req.body));
 
-    const isValid = mp.verifyCallback(req.body, req.headers['x-signature']);
-    if (!isValid) { console.warn('[CALLBACK] Signature tidak valid'); return; }
+    const body   = req.body;
+    const status = (body.status || '').toLowerCase();
 
-    const status = req.body.status;
-    const ref_no = req.body.reference || req.body.ref_no || (req.body.data && req.body.data.ref_no);
-    if (status !== 'success' && status !== 'paid') return;
+    // Hanya proses jika status success
+    if (status !== 'success' && status !== 'paid') {
+        console.log('[CALLBACK] Status bukan success, diabaikan:', status);
+        return;
+    }
 
-    const senderKey = Object.keys(regSession).find(k => regSession[k].refNo === ref_no);
-    if (!senderKey) { console.warn('[CALLBACK] Ref no tidak ditemukan:', ref_no); return; }
+    // Ambil ref_no dari root (reference) atau dari data.ref_no — sesuai docs
+    const refNo = body.reference || (body.data && body.data.ref_no) || body.ref_no;
+    if (!refNo) {
+        console.warn('[CALLBACK] ref_no tidak ditemukan di payload');
+        return;
+    }
+
+    console.log('[CALLBACK] ref_no diterima:', refNo);
+
+    // Cari sesi pendaftaran yang cocok
+    const senderKey = Object.keys(regSession).find(k => regSession[k].refNo === refNo);
+    if (!senderKey) {
+        console.warn('[CALLBACK] Tidak ada sesi untuk ref_no:', refNo);
+        return;
+    }
 
     const sess  = regSession[senderKey];
     const users = readUsers();
 
+    // Simpan ke users.json
     users[sess.nomorBot] = {
         sheet : sess.sheet,
-        admin : '',
+        admin : '',           // owner isi manual
         nama  : sess.nama,
         aktif : true,
         daftar: new Date().toISOString()
@@ -325,7 +390,7 @@ app.post('/payment/callback', async (req, res) => {
     writeUsers(users);
     delete regSession[senderKey];
 
-    console.log(`[REGISTRASI SUKSES] ${sess.nomorBot} — ${sess.nama}`);
+    console.log(`[REGISTRASI SUKSES] nomor: ${sess.nomorBot} | bisnis: ${sess.nama}`);
 
     // Notif ke pendaftar
     await kirim(senderKey,
@@ -353,7 +418,7 @@ Yeay! Pembayaran berhasil 🎉
 Terima kasih sudah bergabung! 🚀
 _Powered by ${OWNER_NAMA}_ 🤖`);
 
-    // Notif ke owner (opsional)
+    // Notif ke owner
     await kirim(OWNER_NOMOR,
 `🔔 *PENDAFTAR BARU!*
 
@@ -362,8 +427,18 @@ _Powered by ${OWNER_NAMA}_ 🤖`);
 ┃ 📱 *Bot    :* ${sess.nomorBot}
 ┃ 📞 *WA     :* ${senderKey}
 ┃ 💰 *Bayar  :* Rp ${HARGA.toLocaleString('id-ID')}
+┃ 🔖 *Ref No :* ${refNo}
 └──────────────────────
-⚠️ Jangan lupa set nomor *admin* di users.json!`);
+⚠️ Set nomor *admin* di users.json untuk nomor bot *${sess.nomorBot}*`);
+});
+
+// ─── Halaman sukses setelah redirect dari QRIS ───────
+app.get('/payment/success', (req, res) => {
+    res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:50px">
+        <h1>✅ Pembayaran Berhasil!</h1>
+        <p>Akun Corpo Anda sedang diaktifkan.</p>
+        <p>Silakan kembali ke WhatsApp untuk konfirmasi.</p>
+    </body></html>`);
 });
 
 // ═══════════════════════════════════════════════════════
@@ -380,7 +455,7 @@ app.post('/webhook', async (req, res) => {
 
     try {
         // Cek sesi registrasi dulu
-        const handled = await handleRegistrasi(senderKey, message);
+        const handled = await handleRegistrasi(senderKey, message, name);
         if (handled) return;
 
         const userData = readUsers();
@@ -508,6 +583,6 @@ ${role}`;
     }
 });
 
-app.get('/', (req, res) => res.send(`${OWNER_NAMA} Bot LIVE ✅ — ${BASE_URL}`));
+app.get('/', (req, res) => res.send(`${OWNER_NAMA} Bot LIVE ✅`));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log(`${OWNER_NAMA} LIVE ON PORT ${PORT}`));
