@@ -305,7 +305,8 @@ app.post('/payment/callback', async (req, res) => {
     const isValid = mp.verifyCallback(req.body, req.headers['x-signature']);
     if (!isValid) { console.warn('[CALLBACK] Signature tidak valid'); return; }
 
-    const { ref_no, status } = req.body;
+    const status = req.body.status;
+    const ref_no = req.body.reference || req.body.ref_no || (req.body.data && req.body.data.ref_no);
     if (status !== 'success' && status !== 'paid') return;
 
     const senderKey = Object.keys(regSession).find(k => regSession[k].refNo === ref_no);
