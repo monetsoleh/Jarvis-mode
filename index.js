@@ -1,9 +1,20 @@
-const express = require('express');
-const axios   = require('axios');
+const express  = require('express');
+const axios    = require('axios');
 const { Pool } = require('pg');
-const app     = express();
+const fs       = require('fs');
+const path     = require('path');
+const app      = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// ─── Serve file dari /tmp (untuk kirim ke WA) ─────────
+app.use('/files', express.static('/tmp'));
+
+// ─── Library export ───────────────────────────────────
+const ExcelJS = require('exceljs');
+const { Document, Packer, Paragraph, Table, TableRow, TableCell,
+        TextRun, WidthType, AlignmentType, HeadingLevel, BorderStyle } = require('docx');
+const PDFDocument = require('pdfkit');
 
 // ─── ENV ─────────────────────────────────────
 const GROQ_KEY        = (process.env.GROQ_API_KEY      || '').trim();
@@ -290,8 +301,6 @@ _Contoh: ketik *"1"* untuk ${sheets[0] || 'menu pertama'}_
 🕐 Siap melayani 24 jam!`;
 }
 
-// ─── Sambutan untuk pengguna BELUM DAFTAR ────────────
-// Tampil untuk semua pesan pertama, termasuk "menu" dan "batal"
 function pesanSambutanBelumDaftar(namaUser) {
     return `╔══════════════════════╗
 ║   🤖  *C O R P O*   ║
@@ -324,8 +333,6 @@ Atau hubungi kami langsung:
 🔗 ${OWNER_WA_LINK}`;
 }
 
-// ─── Sambutan untuk pengguna SUDAH DAFTAR ────────────
-// Tampil saat sapaan atau setelah "batal"
 function pesanSambutanSudahDaftar(namaUser) {
     return `╔══════════════════════╗
 ║   🤖  *C O R P O*   ║
@@ -391,9 +398,6 @@ function deteksiTransaksi(message) {
     const adaPemasukan    = polaPemasukan.test(msg);
     if (!adaPengeluaran && !adaPemasukan) return null;
 
-    // Prioritas 1: cari angka setelah "Rp" atau "rp"
-    // Prioritas 2: angka dengan satuan rb/jt
-    // Prioritas 3: angka pertama yang ditemukan
     const polaRp     = /rp\.?\s*(\d[\d.,]*)\s*(rb|ribu|rbu|jt|juta|k)?\b/i;
     const polaSatuan = /(\d[\d.,]+)\s*(rb|ribu|rbu|jt|juta|k)\b/i;
     const polaUmum   = /(\d[\d.,]+)/;
@@ -453,6 +457,344 @@ async function kirim(target, message) {
     );
 }
 
+// ─── Kirim file via Fonnte ────────────────────────────
+async function kirimFile(target, fileUrl, caption) {
+    await axios.post('https://api.fonnte.com/send',
+        { target, url: fileUrl, caption },
+        { headers: { Authorization: FONNTE_TOKEN } }
+    );
+}
+
+// ═══════════════════════════════════════════════════════
+//  EXPORT STATE (in-memory, simpan data sheet terakhir)
+//  Format: { sheetName, headers, rows, namaBisnis, timer }
+// ═══════════════════════════════════════════════════════
+const exportState = {};
+const EXPORT_TTL  = 10 * 60 * 1000; // 10 menit
+
+function simpanExportState(senderKey, sheetName, headers, rows, namaBisnis) {
+    // Hapus timer lama kalau ada
+    if (exportState[senderKey]?.timer) clearTimeout(exportState[senderKey].timer);
+    const timer = setTimeout(() => { delete exportState[senderKey]; }, EXPORT_TTL);
+    exportState[senderKey] = { sheetName, headers, rows, namaBisnis, timer };
+}
+
+function hapusExportState(senderKey) {
+    if (exportState[senderKey]?.timer) clearTimeout(exportState[senderKey].timer);
+    delete exportState[senderKey];
+}
+
+// ─── Parse data sheet menjadi headers + rows ──────────
+// Handles berbagai format output dari Google Apps Script
+function parseSheetRows(rawJsonString) {
+    try {
+        const parsed = JSON.parse(rawJsonString);
+
+        // Format 1: { data: [[header,...], [row,...], ...] } — array of arrays
+        if (parsed.data && Array.isArray(parsed.data) && Array.isArray(parsed.data[0])) {
+            const all     = parsed.data;
+            const headers = all[0].map(String);
+            const rows    = all.slice(1).filter(r => r.some(c => c !== null && c !== ''));
+            return { headers, rows: rows.map(r => r.map(c => c === null ? '' : String(c))) };
+        }
+
+        // Format 2: { data: [{col: val}, ...] } — array of objects
+        if (parsed.data && Array.isArray(parsed.data) && typeof parsed.data[0] === 'object') {
+            const headers = Object.keys(parsed.data[0]);
+            const rows    = parsed.data.map(obj => headers.map(h => obj[h] === null ? '' : String(obj[h] || '')));
+            return { headers, rows };
+        }
+
+        // Format 3: [[header,...], [row,...]] — direct array of arrays
+        if (Array.isArray(parsed) && Array.isArray(parsed[0])) {
+            const headers = parsed[0].map(String);
+            const rows    = parsed.slice(1).filter(r => r.some(c => c !== null && c !== ''));
+            return { headers, rows: rows.map(r => r.map(c => c === null ? '' : String(c))) };
+        }
+
+        // Format 4: [{col: val}, ...] — direct array of objects
+        if (Array.isArray(parsed) && typeof parsed[0] === 'object') {
+            const headers = Object.keys(parsed[0]);
+            const rows    = parsed.map(obj => headers.map(h => obj[h] === null ? '' : String(obj[h] || '')));
+            return { headers, rows };
+        }
+
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+// ─── Format nominal Rupiah ────────────────────────────
+function formatRp(val) {
+    const num = parseFloat(String(val).replace(/[^0-9.]/g, ''));
+    if (isNaN(num)) return String(val);
+    return 'Rp ' + num.toLocaleString('id-ID');
+}
+
+function isNominalCol(header) {
+    return /nominal|harga|bayar|jumlah|total|amount|gaji|biaya/i.test(header);
+}
+
+// ─── Generate file Excel ──────────────────────────────
+async function generateExcel(headers, rows, sheetName, namaBisnis) {
+    const wb   = new ExcelJS.Workbook();
+    wb.creator = 'Corpo Bot';
+    const ws   = wb.addWorksheet(sheetName);
+
+    // Header row
+    ws.addRow([`Laporan ${sheetName} — ${namaBisnis}`]);
+    ws.addRow([`Dibuat: ${new Date().toLocaleString('id-ID')}`]);
+    ws.addRow([]);
+
+    // Kolom headers
+    const headerRow = ws.addRow(headers);
+    headerRow.font  = { bold: true, color: { argb: 'FFFFFFFF' } };
+    headerRow.fill  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A5F' } };
+    headerRow.alignment = { horizontal: 'center', vertical: 'middle' };
+    headerRow.height = 20;
+
+    // Data rows
+    rows.forEach((row, i) => {
+        const r = ws.addRow(row.map((cell, ci) => {
+            if (isNominalCol(headers[ci])) {
+                const num = parseFloat(String(cell).replace(/[^0-9]/g, ''));
+                return isNaN(num) ? cell : num;
+            }
+            return cell;
+        }));
+        r.fill = {
+            type: 'pattern', pattern: 'solid',
+            fgColor: { argb: i % 2 === 0 ? 'FFF5F5F5' : 'FFFFFFFF' }
+        };
+        r.eachCell((cell, ci) => {
+            const h = headers[ci - 1] || '';
+            if (isNominalCol(h)) {
+                cell.numFmt = '#,##0';
+                cell.alignment = { horizontal: 'right' };
+            }
+        });
+    });
+
+    // Hitung total kolom nominal
+    const totalRow = [];
+    headers.forEach((h, i) => {
+        if (i === 0) { totalRow.push('TOTAL'); return; }
+        if (isNominalCol(h)) {
+            const sum = rows.reduce((acc, r) => {
+                const num = parseFloat(String(r[i]).replace(/[^0-9]/g, ''));
+                return acc + (isNaN(num) ? 0 : num);
+            }, 0);
+            totalRow.push(sum);
+        } else {
+            totalRow.push('');
+        }
+    });
+    const tr   = ws.addRow(totalRow);
+    tr.font    = { bold: true };
+    tr.fill    = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFE0B2' } };
+    tr.eachCell((cell, ci) => {
+        if (isNominalCol(headers[ci - 1] || '')) {
+            cell.numFmt    = '#,##0';
+            cell.alignment = { horizontal: 'right' };
+        }
+    });
+
+    // Auto lebar kolom
+    ws.columns.forEach(col => {
+        let max = 10;
+        col.eachCell({ includeEmpty: true }, cell => {
+            const len = cell.value ? String(cell.value).length : 0;
+            if (len > max) max = len;
+        });
+        col.width = Math.min(max + 4, 40);
+    });
+
+    // Border semua sel data
+    ws.eachRow({ includeEmpty: false }, row => {
+        row.eachCell({ includeEmpty: true }, cell => {
+            cell.border = {
+                top:    { style: 'thin' }, bottom: { style: 'thin' },
+                left:   { style: 'thin' }, right:  { style: 'thin' }
+            };
+        });
+    });
+
+    const fileName = `Corpo_${sheetName.replace(/\s+/g,'_')}_${Date.now()}.xlsx`;
+    const filePath = `/tmp/${fileName}`;
+    await wb.xlsx.writeFile(filePath);
+    return { fileName, filePath };
+}
+
+// ─── Generate file Word ───────────────────────────────
+async function generateWord(headers, rows, sheetName, namaBisnis) {
+    const borderCfg = { style: BorderStyle.SINGLE, size: 1, color: '999999' };
+
+    // Header row cells
+    const headerCells = headers.map(h => new TableCell({
+        children: [new Paragraph({
+            children: [new TextRun({ text: h, bold: true, color: 'FFFFFF', size: 20 })],
+            alignment: AlignmentType.CENTER
+        })],
+        shading: { fill: '1E3A5F' },
+        borders: { top: borderCfg, bottom: borderCfg, left: borderCfg, right: borderCfg }
+    }));
+
+    // Data rows
+    const dataRows = rows.map((row, i) => new TableRow({
+        children: row.map((cell, ci) => {
+            const text = isNominalCol(headers[ci]) ? formatRp(cell) : (cell || '-');
+            return new TableCell({
+                children: [new Paragraph({
+                    children: [new TextRun({ text, size: 18 })],
+                    alignment: isNominalCol(headers[ci]) ? AlignmentType.RIGHT : AlignmentType.LEFT
+                })],
+                shading: { fill: i % 2 === 0 ? 'F5F5F5' : 'FFFFFF' },
+                borders: { top: borderCfg, bottom: borderCfg, left: borderCfg, right: borderCfg }
+            });
+        })
+    }));
+
+    // Total row
+    const totalCells = headers.map((h, i) => {
+        let text = i === 0 ? 'TOTAL' : '';
+        if (isNominalCol(h) && i > 0) {
+            const sum = rows.reduce((acc, r) => {
+                const num = parseFloat(String(r[i]).replace(/[^0-9]/g, ''));
+                return acc + (isNaN(num) ? 0 : num);
+            }, 0);
+            text = formatRp(sum);
+        }
+        return new TableCell({
+            children: [new Paragraph({
+                children: [new TextRun({ text, bold: true, size: 18 })],
+                alignment: isNominalCol(h) ? AlignmentType.RIGHT : AlignmentType.LEFT
+            })],
+            shading: { fill: 'FFE0B2' },
+            borders: { top: borderCfg, bottom: borderCfg, left: borderCfg, right: borderCfg }
+        });
+    });
+
+    const doc = new Document({
+        sections: [{
+            children: [
+                new Paragraph({
+                    children: [new TextRun({ text: `Laporan ${sheetName}`, bold: true, size: 32 })],
+                    heading: HeadingLevel.HEADING_1
+                }),
+                new Paragraph({
+                    children: [new TextRun({ text: `Bisnis: ${namaBisnis}`, size: 22 })]
+                }),
+                new Paragraph({
+                    children: [new TextRun({ text: `Dibuat: ${new Date().toLocaleString('id-ID')}`, size: 20, italics: true })]
+                }),
+                new Paragraph({ children: [new TextRun({ text: '' })] }),
+                new Table({
+                    width: { size: 100, type: WidthType.PERCENTAGE },
+                    rows: [
+                        new TableRow({ children: headerCells, tableHeader: true }),
+                        ...dataRows,
+                        new TableRow({ children: totalCells })
+                    ]
+                })
+            ]
+        }]
+    });
+
+    const buffer   = await Packer.toBuffer(doc);
+    const fileName = `Corpo_${sheetName.replace(/\s+/g,'_')}_${Date.now()}.docx`;
+    const filePath = `/tmp/${fileName}`;
+    fs.writeFileSync(filePath, buffer);
+    return { fileName, filePath };
+}
+
+// ─── Generate file PDF ────────────────────────────────
+async function generatePDF(headers, rows, sheetName, namaBisnis) {
+    return new Promise((resolve, reject) => {
+        const fileName = `Corpo_${sheetName.replace(/\s+/g,'_')}_${Date.now()}.pdf`;
+        const filePath = `/tmp/${fileName}`;
+        const doc      = new PDFDocument({ margin: 40, size: 'A4' });
+        const stream   = fs.createWriteStream(filePath);
+        doc.pipe(stream);
+
+        // Judul
+        doc.fontSize(18).font('Helvetica-Bold')
+           .text(`Laporan ${sheetName}`, { align: 'center' });
+        doc.fontSize(11).font('Helvetica')
+           .text(`Bisnis: ${namaBisnis}`, { align: 'center' });
+        doc.fontSize(10).fillColor('#666666')
+           .text(`Dibuat: ${new Date().toLocaleString('id-ID')}`, { align: 'center' });
+        doc.moveDown(1);
+
+        // Hitung lebar kolom proporsional
+        const pageW    = doc.page.width - 80;
+        const colCount = headers.length;
+        const colW     = pageW / colCount;
+        const rowH     = 20;
+        let   y        = doc.y;
+
+        const drawRow = (values, isHeader = false, isTotal = false, fillColor = null) => {
+            const x0 = 40;
+            // Background
+            const bg = isHeader ? '#1E3A5F' : isTotal ? '#FFE0B2' : (fillColor || '#FFFFFF');
+            doc.rect(x0, y, pageW, rowH).fill(bg);
+            // Teks
+            doc.fillColor(isHeader ? '#FFFFFF' : '#000000')
+               .fontSize(isHeader ? 9 : 8)
+               .font(isHeader || isTotal ? 'Helvetica-Bold' : 'Helvetica');
+            values.forEach((val, i) => {
+                const xCell = x0 + i * colW + 3;
+                const align = isNominalCol(headers[i]) ? 'right' : 'left';
+                const text  = String(val || '').substring(0, 25); // truncate panjang
+                doc.text(text, xCell, y + 5, { width: colW - 6, align, lineBreak: false });
+            });
+            // Border bawah
+            doc.strokeColor('#CCCCCC').lineWidth(0.5)
+               .moveTo(x0, y + rowH).lineTo(x0 + pageW, y + rowH).stroke();
+            y += rowH;
+            // Pindah halaman kalau hampir habis
+            if (y > doc.page.height - 60) {
+                doc.addPage();
+                y = 40;
+            }
+        };
+
+        // Header
+        drawRow(headers, true);
+        // Data
+        rows.forEach((row, i) => {
+            const displayed = row.map((cell, ci) =>
+                isNominalCol(headers[ci]) ? formatRp(cell) : cell
+            );
+            drawRow(displayed, false, false, i % 2 === 0 ? '#F5F5F5' : '#FFFFFF');
+        });
+        // Total
+        const totalVals = headers.map((h, i) => {
+            if (i === 0) return 'TOTAL';
+            if (!isNominalCol(h)) return '';
+            const sum = rows.reduce((acc, r) => {
+                const num = parseFloat(String(r[i]).replace(/[^0-9]/g, ''));
+                return acc + (isNaN(num) ? 0 : num);
+            }, 0);
+            return formatRp(sum);
+        });
+        drawRow(totalVals, false, true);
+
+        doc.end();
+        stream.on('finish', () => resolve({ fileName, filePath }));
+        stream.on('error', reject);
+    });
+}
+
+// ─── Hapus file sementara setelah 5 menit ─────────────
+function jadwalHapusFile(filePath) {
+    setTimeout(() => {
+        fs.unlink(filePath, err => {
+            if (!err) console.log(`[FILE] Dihapus: ${filePath}`);
+        });
+    }, 5 * 60 * 1000);
+}
+
 // ═══════════════════════════════════════════════════════
 //  ALUR PENDAFTARAN VIA WHATSAPP
 // ═══════════════════════════════════════════════════════
@@ -460,14 +802,12 @@ async function handleRegistrasi(senderKey, message, name) {
     const msg  = message.trim();
     const sess = await getSession(senderKey);
 
-    // Batalkan sesi registrasi yang sedang berjalan
     if (sess && /^(batal|cancel|stop)$/i.test(msg)) {
         await deleteSession(senderKey);
         await kirim(senderKey, '❌ Pendaftaran dibatalkan.\n\nKetik *daftar* kapan saja untuk memulai lagi.');
         return true;
     }
 
-    // Mulai daftar
     if (!sess && /^(daftar|register|subscribe|langganan)$/i.test(msg)) {
         await setSession(senderKey, { step: 'nama' });
         await kirim(senderKey,
@@ -487,10 +827,8 @@ Ketik *nama bisnis* Anda:`);
         return true;
     }
 
-    // Jika tidak ada sesi aktif dan bukan keyword daftar → tidak ditangani di sini
     if (!sess) return false;
 
-    // Step 1: Nama bisnis
     if (sess.step === 'nama') {
         await setSession(senderKey, { ...sess, nama: msg, step: 'nomorBot' });
         await kirim(senderKey,
@@ -505,7 +843,6 @@ _Contoh: 628123456789_`);
         return true;
     }
 
-    // Step 2: Nomor bot
     if (sess.step === 'nomorBot') {
         const nomor = msg.replace(/[^0-9]/g, '');
         if (nomor.length < 10) {
@@ -527,7 +864,6 @@ _https://script.google.com/macros/s/xxx/exec_
         return true;
     }
 
-    // Step 3: Link sheet → buat QRIS
     if (sess.step === 'sheet') {
         if (!msg.startsWith('http')) {
             await kirim(senderKey, '⚠️ Link tidak valid. Harus dimulai dengan *https://*');
@@ -662,18 +998,10 @@ app.post('/webhook', async (req, res) => {
     const senderKey = normalize(sender);
 
     try {
-        // ── Ambil config bot dari DB ──
-        const config = await getUser(deviceKey);
-
-        // ── Tentukan apakah pengirim adalah owner atau admin terdaftar ──
-        const isOwner           = senderKey === OWNER_NOMOR;
-        const isRegisteredAdmin = config && (
-    (config.admin && senderKey === config.admin) ||
-    senderKey === config.nomor_bot
-        );
-
-        // ── Perintah owner: setadmin (prioritas tertinggi) ──
-        if (isOwner && message.startsWith('setadmin_')) {
+        // ══════════════════════════════════════════
+        // PRIORITAS 1: Perintah owner setadmin
+        // ══════════════════════════════════════════
+        if (senderKey === OWNER_NOMOR && message.startsWith('setadmin_')) {
             const parts = message.split('_');
             if (parts.length === 3) {
                 const targetBot   = parts[1];
@@ -689,41 +1017,52 @@ app.post('/webhook', async (req, res) => {
             return;
         }
 
-        // ── Nomor bot belum terdaftar / tidak aktif ──
+        // ══════════════════════════════════════════
+        // PRIORITAS 2: Cek apakah bot terdaftar
+        // ══════════════════════════════════════════
+        const config = await getUser(deviceKey);
+
         if (!config || !config.sheet || !config.aktif) {
-            if (isOwner) {
+            if (senderKey === OWNER_NOMOR) {
                 await kirim(senderKey, '⚠️ Nomor bot ini belum ada di database. Daftarkan dulu via /admin/adduser');
                 return;
             }
-
-            // Pengirim umum yang belum daftar:
-            // Apapun yang mereka ketik (termasuk "menu", "batal") → tampilkan sambutan + arahkan daftar
-            // Kecuali jika sedang dalam sesi registrasi → proses registrasi
             const handled = await handleRegistrasi(senderKey, message, name);
             if (handled) return;
-
-            // Semua pesan lainnya → sambutan belum daftar
             await kirim(senderKey, pesanSambutanBelumDaftar(name));
             return;
         }
 
-        // ── Pengguna SUDAH TERDAFTAR & AKTIF ──
+        // ══════════════════════════════════════════
+        // PRIORITAS 3: Cek admin
+        // ══════════════════════════════════════════
+        const adminList = (config.admin || '').split(',').map(n => n.trim()).filter(Boolean);
+        const isAdmin   = adminList.includes(senderKey);
 
-        // Owner & admin terdaftar tidak masuk ke flow registrasi
-        if (!isOwner && !isRegisteredAdmin) {
-            const handled = await handleRegistrasi(senderKey, message, name);
-            if (handled) return;
+        if (!isAdmin) {
+            await kirim(senderKey,
+`╔══════════════════════╗
+║   🤖  *C O R P O*   ║
+╚══════════════════════╝
+
+⛔ *Akses Ditolak*
+
+Nomor Anda tidak terdaftar sebagai admin bot ini.
+
+Hubungi pemilik bisnis untuk informasi lebih lanjut.
+
+📱 *+62 822-4040-0388*
+🔗 ${OWNER_WA_LINK}`);
+            return;
         }
 
-        const adminList = (config.admin || '').split(',').map(n => n.trim()).filter(Boolean);
-const isAdmin   = adminList.includes(senderKey);
-        const sheets  = await getSheetNames(config.sheet);
+        // ══════════════════════════════════════════
+        // HANYA ADMIN SAH LOLOS KE BAWAH INI
+        // ══════════════════════════════════════════
 
         // ── CEK MASA LANGGANAN ──
         if (config.expired_at && new Date(config.expired_at) < new Date()) {
-            if (config.aktif) {
-                await pool.query(`UPDATE users SET aktif = false WHERE nomor_bot = $1`, [deviceKey]);
-            }
+            if (config.aktif) await pool.query(`UPDATE users SET aktif = false WHERE nomor_bot = $1`, [deviceKey]);
             await kirim(senderKey, pesanExpired());
             return;
         }
@@ -747,20 +1086,23 @@ const isAdmin   = adminList.includes(senderKey);
             return;
         }
 
-        const msg = message.trim().toLowerCase();
+        const sheets = await getSheetNames(config.sheet);
+        const msg    = message.trim().toLowerCase();
 
-        // ── BATAL → kembali ke sambutan sudah daftar ──
+        // ── BATAL ──
         if (/^(batal|cancel|stop)$/.test(msg)) {
+            hapusExportState(senderKey);
             const balasan = pesanSambutanSudahDaftar(name);
             await kirim(senderKey, balasan);
             addHistory(senderKey, 'assistant', balasan);
             return;
         }
 
-        // ── MENU → tampilkan daftar spreadsheet langsung ──
+        // ── MENU ──
         if (/^menu$/.test(msg)) {
-            const balasan = buildMenu(sheets, name);
-            const isNew   = (usage.reset_date !== today) || (tokensHariIni === 0 && !usage.warned);
+            hapusExportState(senderKey);
+            const balasan    = buildMenu(sheets, name);
+            const isNew      = (usage.reset_date !== today) || (tokensHariIni === 0 && !usage.warned);
             const kirimPesan = isNew ? pesanInfoToken() + '\n' + balasan : balasan;
             await kirim(senderKey, kirimPesan);
             addHistory(senderKey, 'assistant', balasan);
@@ -768,14 +1110,59 @@ const isAdmin   = adminList.includes(senderKey);
             return;
         }
 
-        // ── 1. PILIH MENU ANGKA ──
+        // ══════════════════════════════════════════
+        // FITUR EXPORT: Cek apakah user minta cetak
+        // ══════════════════════════════════════════
+        if (/^(excel|xlsx)$/.test(msg) || /^(word|docx)$/.test(msg) || /^(pdf)$/.test(msg)) {
+            const state = exportState[senderKey];
+            if (!state) {
+                await kirim(senderKey,
+`⚠️ Tidak ada data yang bisa dicetak.
+
+Pilih menu terlebih dahulu, lalu ketik format cetak yang diinginkan.`);
+                return;
+            }
+
+            await kirim(senderKey, '⏳ Sedang membuat file, mohon tunggu sebentar...');
+
+            try {
+                let result;
+                let tipeFile;
+
+                if (/^(excel|xlsx)$/.test(msg)) {
+                    result   = await generateExcel(state.headers, state.rows, state.sheetName, state.namaBisnis);
+                    tipeFile = 'Excel 📊';
+                } else if (/^(word|docx)$/.test(msg)) {
+                    result   = await generateWord(state.headers, state.rows, state.sheetName, state.namaBisnis);
+                    tipeFile = 'Word 📄';
+                } else {
+                    result   = await generatePDF(state.headers, state.rows, state.sheetName, state.namaBisnis);
+                    tipeFile = 'PDF 📋';
+                }
+
+                const fileUrl = `${BASE_URL}/files/${result.fileName}`;
+                jadwalHapusFile(result.filePath);
+                hapusExportState(senderKey);
+
+                await kirimFile(senderKey, fileUrl,
+`✅ File ${tipeFile} siap!
+📁 *${state.sheetName}* — ${state.namaBisnis}
+📅 ${new Date().toLocaleString('id-ID')}`);
+
+                console.log(`[EXPORT] ${senderKey} | ${tipeFile} | ${state.sheetName}`);
+            } catch (err) {
+                console.error('[EXPORT ERROR]', err.message);
+                await kirim(senderKey, '⚠️ Gagal membuat file. Silakan coba lagi.');
+            }
+            return;
+        }
+
+        // ── PILIH MENU ANGKA ──
         const sheetDipilih = deteksiPilihMenu(message, sheets);
         if (sheetDipilih) {
-            const dataBisnis = await getSheetData(config.sheet);
-            const icon = getIcon(sheetDipilih);
-            const role = isAdmin
-                ? 'AKSES: ADMIN. Boleh tampilkan semua data.'
-                : 'AKSES: CUSTOMER. Rahasiakan modal dan gaji.';
+            const rawData    = await getSheetData(config.sheet);
+            const dataBisnis = rawData;
+            const icon       = getIcon(sheetDipilih);
             const promptFokus =
 `Anda adalah "Corpo" asisten AI bisnis profesional dan friendly.
 Pengguna memilih menu *${sheetDipilih}* ${icon}.
@@ -788,11 +1175,11 @@ FORMAT WAJIB (WhatsApp):
 - Ringkasan di akhir jika relevan
 - DILARANG tabel markdown
 DATA: ${dataBisnis}
-${role}`;
+AKSES: ADMIN. Boleh tampilkan semua data.`;
             const ai = await axios.post('https://api.groq.com/openai/v1/chat/completions',
                 {
-                    model   : 'llama-3.1-8b-instant',
-                    messages: [
+                    model      : 'llama-3.1-8b-instant',
+                    messages   : [
                         { role: 'system', content: promptFokus },
                         { role: 'user',   content: `Tampilkan data ${sheetDipilih}` }
                     ],
@@ -801,24 +1188,38 @@ ${role}`;
                 },
                 { headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' } }
             );
-            const jawaban = ai.data.choices[0].message.content;
-            const tokensRequest  = estimasiToken(promptFokus) + estimasiToken(`Tampilkan data ${sheetDipilih}`);
-            const tokensResponse = estimasiToken(jawaban);
-            const tokensTotal    = tokensRequest + tokensResponse;
+            const jawaban     = ai.data.choices[0].message.content;
+            const tokensTotal = estimasiToken(promptFokus) + estimasiToken(jawaban);
             await addTokenUsage(senderKey, tokensTotal);
+
             const usageSetelah = tokensHariIni + tokensTotal;
             let pesanAkhir     = jawaban;
             if (usageSetelah >= TOKEN_WARN_AT && !usage.warned) {
                 pesanAkhir += '\n' + pesanPeringatanToken(TOKEN_LIMIT - usageSetelah);
                 await setWarned(senderKey);
             }
+
+            // ── Simpan data untuk export + tawari cetak ──
+            const parsed = parseSheetRows(rawData);
+            if (parsed && parsed.rows.length > 0) {
+                simpanExportState(senderKey, sheetDipilih, parsed.headers, parsed.rows, config.nama || 'Bisnis');
+                pesanAkhir +=
+`\n\n━━━━━━━━━━━━━━━━━━━━━━
+🖨️ *Mau cetak data ini?*
+┌──────────────────────
+┃ 📊 Ketik *excel* → File Excel (.xlsx)
+┃ 📄 Ketik *word*  → File Word (.docx)
+┃ 📋 Ketik *pdf*   → File PDF
+└──────────────────────`;
+            }
+
             addHistory(senderKey, 'user', `Pilih menu: ${sheetDipilih}`);
             addHistory(senderKey, 'assistant', jawaban);
             await kirim(senderKey, pesanAkhir);
             return;
         }
 
-        // ── 2. SAPAAN → tampilkan sambutan sudah daftar ──
+        // ── SAPAAN ──
         if (isSapaan(message)) {
             const balasan = pesanSambutanSudahDaftar(name);
             await kirim(senderKey, balasan);
@@ -827,40 +1228,36 @@ ${role}`;
             return;
         }
 
-        // ── 3. CATAT TRANSAKSI (admin only) ──
-        if (isAdmin) {
-            const transaksi = deteksiTransaksi(message);
-            if (transaksi) {
-                const hasil = await catatTransaksi(config.sheet, {
-                    action     : 'catat',
-                    sheet      : transaksi.sheet,
-                    tipe       : transaksi.tipe,
-                    kategori   : 'Umum',
-                    keterangan : transaksi.keterangan || message,
-                    nominal    : transaksi.nominal
-                });
-                const ikon  = transaksi.tipe === 'Pemasukan' ? '💰' : '💸';
-                const balas = hasil.status === 'ok'
-                    ? `╔══════════════════════╗\n║  ✅  BERHASIL DICATAT  ║\n╚══════════════════════╝\n\n${ikon} *${transaksi.tipe}*\n──────────────────────\n💵 *Nominal    :* Rp ${transaksi.nominal.toLocaleString('id-ID')}\n📝 *Keterangan :* ${transaksi.keterangan||'-'}\n📅 *Waktu      :* ${new Date().toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})}\n──────────────────────\n📊 Data sudah masuk ke spreadsheet Bos!`
-                    : `⚠️ Gagal catat: ${hasil.pesan}`;
-                await kirim(senderKey, balas);
-                addHistory(senderKey, 'assistant', balas);
-                return;
-            }
+        // ── CATAT TRANSAKSI ──
+        const transaksi = deteksiTransaksi(message);
+        if (transaksi) {
+            const hasil = await catatTransaksi(config.sheet, {
+                action    : 'catat',
+                sheet     : transaksi.sheet,
+                tipe      : transaksi.tipe,
+                kategori  : 'Umum',
+                keterangan: transaksi.keterangan || message,
+                nominal   : transaksi.nominal
+            });
+            const ikon  = transaksi.tipe === 'Pemasukan' ? '💰' : '💸';
+            const balas = hasil.status === 'ok'
+                ? `╔══════════════════════╗\n║  ✅  BERHASIL DICATAT  ║\n╚══════════════════════╝\n\n${ikon} *${transaksi.tipe}*\n──────────────────────\n💵 *Nominal    :* Rp ${transaksi.nominal.toLocaleString('id-ID')}\n📝 *Keterangan :* ${transaksi.keterangan||'-'}\n📅 *Waktu      :* ${new Date().toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})}\n──────────────────────\n📊 Data sudah masuk ke spreadsheet Bos!`
+                : `⚠️ Gagal catat: ${hasil.pesan}`;
+            await kirim(senderKey, balas);
+            addHistory(senderKey, 'assistant', balas);
+            return;
         }
 
-        // ── 4. CHAT UMUM → AI ──
-        const dataBisnis = await getSheetData(config.sheet);
-        const role = isAdmin
-            ? 'AKSES: ADMIN. Boleh tampilkan semua data.'
-            : 'AKSES: CUSTOMER. Rahasiakan modal dan gaji.';
+        // ── CHAT UMUM → AI ──
+        const dataBisnis  = await getSheetData(config.sheet);
         const systemPrompt =
 `Anda adalah "Corpo" (Corpomind), asisten AI bisnis cerdas dan friendly. Panggil pengguna "Bos".
 KEPRIBADIAN: Profesional, santai, hangat, sedikit humoris.
 ATURAN: Jawab sesuai yang ditanya saja. Tanya dulu jika kurang detail. Beritahu sopan jika data tidak ada.
 FORMAT (WhatsApp): Header+icon, garis ──────, field pakai icon+*label* tebal, pisah entri ─ ─ ─, DILARANG tabel markdown.
 DATA: ${dataBisnis}
-${role}`;
+AKSES: ADMIN. Boleh tampilkan semua data.`;
+
         addHistory(senderKey, 'user', message);
         const messages = [
             { role: 'system', content: systemPrompt },
@@ -870,19 +1267,13 @@ ${role}`;
             }))
         ];
         const ai = await axios.post('https://api.groq.com/openai/v1/chat/completions',
-            {
-                model   : 'llama-3.1-8b-instant',
-                messages,
-                max_tokens : 1024,
-                temperature: 0.7
-            },
+            { model: 'llama-3.1-8b-instant', messages, max_tokens: 1024, temperature: 0.7 },
             { headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' } }
         );
-        const jawaban = ai.data.choices[0].message.content;
-        const tokensRequest2  = messages.reduce((acc, m) => acc + estimasiToken(typeof m.content === 'string' ? m.content : ''), 0);
-        const tokensResponse2 = estimasiToken(jawaban);
-        const tokensTotal2    = tokensRequest2 + tokensResponse2;
+        const jawaban      = ai.data.choices[0].message.content;
+        const tokensTotal2 = messages.reduce((acc, m) => acc + estimasiToken(typeof m.content === 'string' ? m.content : ''), 0) + estimasiToken(jawaban);
         await addTokenUsage(senderKey, tokensTotal2);
+
         const usageSetelah2 = tokensHariIni + tokensTotal2;
         let pesanAkhir2     = jawaban;
         if (usageSetelah2 >= TOKEN_WARN_AT && !usage.warned) {
