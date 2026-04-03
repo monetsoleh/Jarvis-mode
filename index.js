@@ -387,17 +387,47 @@ function deteksiTransaksi(message) {
     const msg             = message.toLowerCase();
     const polaPengeluaran = /\b(beli|bayar|keluar|pengeluaran|belanja|setor|bayarin|biaya)\b/i;
     const polaPemasukan   = /\b(terima|masuk|pemasukan|untung|laba|dapat|penjualan|terjual)\b/i;
-    const polaAngka       = /(\d[\d.,]*)\s*(rb|ribu|rbu|jt|juta|k)?/i;
     const adaPengeluaran  = polaPengeluaran.test(msg);
     const adaPemasukan    = polaPemasukan.test(msg);
-    const matchAngka      = msg.match(polaAngka);
-    if (!matchAngka || (!adaPengeluaran && !adaPemasukan)) return null;
-    let nominal = parseFloat(matchAngka[1].replace(/[.,]/g, ''));
-    const satuan = (matchAngka[2] || '').toLowerCase();
+    if (!adaPengeluaran && !adaPemasukan) return null;
+
+    // Prioritas 1: cari angka setelah "Rp" atau "rp"
+    // Prioritas 2: angka dengan satuan rb/jt
+    // Prioritas 3: angka pertama yang ditemukan
+    const polaRp     = /rp\.?\s*(\d[\d.,]*)\s*(rb|ribu|rbu|jt|juta|k)?\b/i;
+    const polaSatuan = /(\d[\d.,]+)\s*(rb|ribu|rbu|jt|juta|k)\b/i;
+    const polaUmum   = /(\d[\d.,]+)/;
+
+    let nominalRaw, satuan = '';
+
+    const matchRp = msg.match(polaRp);
+    if (matchRp) {
+        nominalRaw = matchRp[1];
+        satuan     = (matchRp[2] || '').toLowerCase();
+    } else {
+        const matchSatuan = msg.match(polaSatuan);
+        if (matchSatuan) {
+            nominalRaw = matchSatuan[1];
+            satuan     = (matchSatuan[2] || '').toLowerCase();
+        } else {
+            const matchUmum = msg.match(polaUmum);
+            if (!matchUmum) return null;
+            nominalRaw = matchUmum[1];
+        }
+    }
+
+    let nominal = parseFloat(nominalRaw.replace(/[.,]/g, ''));
     if (/^(rb|ribu|rbu|k)$/.test(satuan)) nominal *= 1000;
     if (/^(jt|juta)$/.test(satuan))       nominal *= 1_000_000;
+
     const tipe       = adaPemasukan ? 'Pemasukan' : 'Pengeluaran';
-    const keterangan = message.replace(polaAngka,'').replace(polaPengeluaran,'').replace(polaPemasukan,'').replace(/catat|tolong|dong|ya|yuk/gi,'').trim();
+    const keterangan = message
+        .replace(/rp\.?\s*\d[\d.,]*/gi, '')
+        .replace(polaPengeluaran, '')
+        .replace(polaPemasukan, '')
+        .replace(/catat|tolong|dong|ya|yuk/gi, '')
+        .trim();
+
     return { tipe, nominal, keterangan, sheet: tipe };
 }
 
