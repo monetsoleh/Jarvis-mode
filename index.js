@@ -668,8 +668,8 @@ app.post('/webhook', async (req, res) => {
         // ── Tentukan apakah pengirim adalah owner atau admin terdaftar ──
         const isOwner           = senderKey === OWNER_NOMOR;
         const isRegisteredAdmin = config && (
-            senderKey === config.admin ||
-            senderKey === config.nomor_bot
+    (config.admin && senderKey === config.admin) ||
+    senderKey === config.nomor_bot
         );
 
         // ── Perintah owner: setadmin (prioritas tertinggi) ──
@@ -715,7 +715,7 @@ app.post('/webhook', async (req, res) => {
             if (handled) return;
         }
 
-        const isAdmin = senderKey === config.admin || senderKey.includes(config.admin);
+        const isAdmin = !!(config.admin) && senderKey === config.admin;
         const sheets  = await getSheetNames(config.sheet);
 
         // ── CEK MASA LANGGANAN ──
