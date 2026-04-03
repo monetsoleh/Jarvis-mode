@@ -127,7 +127,8 @@ async function cekLanggananHarian() {
             await pool.query(`UPDATE users SET warned_exp = true WHERE nomor_bot = $1`, [user.nomor_bot]);
         }
         const expired = await pool.query(`
-            SELECT nomor_bot, nama, admin FROM users WHERE aktif = true AND expired_at < NOW()
+            SELECT nomor_bot, nama, admin FROM users
+            WHERE aktif = true AND expired_at < NOW()
         `);
         for (const user of expired.rows) {
             await pool.query(`UPDATE users SET aktif = false WHERE nomor_bot = $1`, [user.nomor_bot]);
@@ -289,7 +290,8 @@ _Contoh: ketik *"1"* untuk ${sheets[0] || 'menu pertama'}_
 🕐 Siap melayani 24 jam!`;
 }
 
-// ─── Sambutan untuk yang BELUM DAFTAR ────────────────
+// ─── Sambutan untuk pengguna BELUM DAFTAR ────────────
+// Tampil untuk semua pesan pertama, termasuk "menu" dan "batal"
 function pesanSambutanBelumDaftar(namaUser) {
     return `╔══════════════════════╗
 ║   🤖  *C O R P O*   ║
@@ -312,14 +314,18 @@ Selamat datang di *Corpo* — Asisten AI untuk bisnis Anda! 🚀
 ✅ Akun aktif otomatis setelah pembayaran
 
 ━━━━━━━━━━━━━━━━━━━━━━
-Ketik *daftar* untuk mulai pendaftaran
+*Ketik perintah berikut untuk mulai:*
+┌──────────────────────
+┃ 📝 *daftar* → Mulai proses pendaftaran
+└──────────────────────
 
-Atau hubungi kami:
+Atau hubungi kami langsung:
 📱 *+62 822-4040-0388*
 🔗 ${OWNER_WA_LINK}`;
 }
 
-// ─── Sambutan untuk yang SUDAH DAFTAR ────────────────
+// ─── Sambutan untuk pengguna SUDAH DAFTAR ────────────
+// Tampil saat sapaan atau setelah "batal"
 function pesanSambutanSudahDaftar(namaUser) {
     return `╔══════════════════════╗
 ║   🤖  *C O R P O*   ║
@@ -330,10 +336,10 @@ Halo${namaUser ? ', *' + namaUser + '*' : ''} 👋
 Selamat datang kembali! Ada yang bisa Corpo bantu? 💼
 
 ━━━━━━━━━━━━━━━━━━━━━━
-*Pilih perintah:*
+*Pilih perintah di bawah:*
 ┌──────────────────────
-┃ 📋 *menu*  → Lihat & akses data bisnis
-┃             dari Google Spreadsheet Anda
+┃ 📋 *menu*  → Lihat & akses data bisnis Anda
+┃             dari Google Spreadsheet
 ┃
 ┃ ❌ *batal* → Kembali ke halaman ini
 ┃             (batalkan proses aktif)
@@ -385,9 +391,9 @@ function deteksiTransaksi(message) {
     const adaPemasukan    = polaPemasukan.test(msg);
     if (!adaPengeluaran && !adaPemasukan) return null;
 
-    // Prioritas 1: angka setelah "Rp"
+    // Prioritas 1: cari angka setelah "Rp" atau "rp"
     // Prioritas 2: angka dengan satuan rb/jt
-    // Prioritas 3: angka pertama
+    // Prioritas 3: angka pertama yang ditemukan
     const polaRp     = /rp\.?\s*(\d[\d.,]*)\s*(rb|ribu|rbu|jt|juta|k)?\b/i;
     const polaSatuan = /(\d[\d.,]+)\s*(rb|ribu|rbu|jt|juta|k)\b/i;
     const polaUmum   = /(\d[\d.,]+)/;
@@ -454,7 +460,7 @@ async function handleRegistrasi(senderKey, message, name) {
     const msg  = message.trim();
     const sess = await getSession(senderKey);
 
-    // Batalkan sesi yang sedang berjalan
+    // Batalkan sesi registrasi yang sedang berjalan
     if (sess && /^(batal|cancel|stop)$/i.test(msg)) {
         await deleteSession(senderKey);
         await kirim(senderKey, '❌ Pendaftaran dibatalkan.\n\nKetik *daftar* kapan saja untuk memulai lagi.');
@@ -481,6 +487,7 @@ Ketik *nama bisnis* Anda:`);
         return true;
     }
 
+    // Jika tidak ada sesi aktif dan bukan keyword daftar → tidak ditangani di sini
     if (!sess) return false;
 
     // Step 1: Nama bisnis
@@ -651,14 +658,22 @@ app.post('/webhook', async (req, res) => {
     if (!message || name === 'Corpomind') return;
 
     const normalize = n => n ? n.replace('@s.whatsapp.net','').replace('@g.us','').trim() : n;
-    const deviceKey = normalize(device);  // nomor bot (yang menerima pesan)
-    const senderKey = normalize(sender);  // nomor yang mengirim pesan
+    const deviceKey = normalize(device);
+    const senderKey = normalize(sender);
 
     try {
-        // ══════════════════════════════════════════
-        // PRIORITAS 1: Perintah owner setadmin
-        // ══════════════════════════════════════════
-        if (senderKey === OWNER_NOMOR && message.startsWith('setadmin_')) {
+        // ── Ambil config bot dari DB ──
+        const config = await getUser(deviceKey);
+
+        // ── Tentukan apakah pengirim adalah owner atau admin terdaftar ──
+        const isOwner           = senderKey === OWNER_NOMOR;
+        const isRegisteredAdmin = config && (
+    (config.admin && senderKey === config.admin) ||
+    senderKey === config.nomor_bot
+        );
+
+        // ── Perintah owner: setadmin (prioritas tertinggi) ──
+        if (isOwner && message.startsWith('setadmin_')) {
             const parts = message.split('_');
             if (parts.length === 3) {
                 const targetBot   = parts[1];
@@ -674,50 +689,35 @@ app.post('/webhook', async (req, res) => {
             return;
         }
 
-        // ══════════════════════════════════════════
-        // PRIORITAS 2: Cek apakah bot ini terdaftar
-        // ══════════════════════════════════════════
-        const config = await getUser(deviceKey);
-
-        // ── BOT TIDAK TERDAFTAR / TIDAK AKTIF ──
-        // Siapapun yang WA → flow daftar atau sambutan belum daftar
+        // ── Nomor bot belum terdaftar / tidak aktif ──
         if (!config || !config.sheet || !config.aktif) {
+            if (isOwner) {
+                await kirim(senderKey, '⚠️ Nomor bot ini belum ada di database. Daftarkan dulu via /admin/adduser');
+                return;
+            }
+
+            // Pengirim umum yang belum daftar:
+            // Apapun yang mereka ketik (termasuk "menu", "batal") → tampilkan sambutan + arahkan daftar
+            // Kecuali jika sedang dalam sesi registrasi → proses registrasi
             const handled = await handleRegistrasi(senderKey, message, name);
             if (handled) return;
-            // Apapun yang diketik selain "daftar" → tampilkan sambutan + arahkan daftar
+
+            // Semua pesan lainnya → sambutan belum daftar
             await kirim(senderKey, pesanSambutanBelumDaftar(name));
             return;
         }
 
-        // ══════════════════════════════════════════
-        // PRIORITAS 3: Bot terdaftar — cek siapa pengirimnya
-        // ══════════════════════════════════════════
+        // ── Pengguna SUDAH TERDAFTAR & AKTIF ──
 
-        // Cek apakah pengirim adalah admin yang sah
-        // PENTING: config.admin tidak boleh kosong, dan harus cocok persis
-        const isAdmin = !!(config.admin) && senderKey === config.admin;
-
-        // ── BUKAN ADMIN → TOLAK AKSES ──
-        if (!isAdmin) {
-            await kirim(senderKey,
-`╔══════════════════════╗
-║   🤖  *C O R P O*   ║
-╚══════════════════════╝
-
-⛔ *Akses Ditolak*
-
-Nomor Anda tidak terdaftar sebagai admin bot ini.
-
-Hubungi pemilik bisnis untuk informasi lebih lanjut.
-
-📱 *+62 822-4040-0388*
-🔗 ${OWNER_WA_LINK}`);
-            return;
+        // Owner & admin terdaftar tidak masuk ke flow registrasi
+        if (!isOwner && !isRegisteredAdmin) {
+            const handled = await handleRegistrasi(senderKey, message, name);
+            if (handled) return;
         }
 
-        // ══════════════════════════════════════════
-        // HANYA ADMIN SAH YANG LOLOS KE BAWAH INI
-        // ══════════════════════════════════════════
+        const adminList = (config.admin || '').split(',').map(n => n.trim()).filter(Boolean);
+const isAdmin   = adminList.includes(senderKey);
+        const sheets  = await getSheetNames(config.sheet);
 
         // ── CEK MASA LANGGANAN ──
         if (config.expired_at && new Date(config.expired_at) < new Date()) {
@@ -747,10 +747,9 @@ Hubungi pemilik bisnis untuk informasi lebih lanjut.
             return;
         }
 
-        const sheets = await getSheetNames(config.sheet);
-        const msg    = message.trim().toLowerCase();
+        const msg = message.trim().toLowerCase();
 
-        // ── BATAL → kembali ke sambutan ──
+        // ── BATAL → kembali ke sambutan sudah daftar ──
         if (/^(batal|cancel|stop)$/.test(msg)) {
             const balasan = pesanSambutanSudahDaftar(name);
             await kirim(senderKey, balasan);
@@ -758,22 +757,25 @@ Hubungi pemilik bisnis untuk informasi lebih lanjut.
             return;
         }
 
-        // ── MENU → tampilkan daftar spreadsheet ──
+        // ── MENU → tampilkan daftar spreadsheet langsung ──
         if (/^menu$/.test(msg)) {
-            const balasan  = buildMenu(sheets, name);
-            const isNew    = (usage.reset_date !== today) || (tokensHariIni === 0 && !usage.warned);
-            const kirimMsg = isNew ? pesanInfoToken() + '\n' + balasan : balasan;
-            await kirim(senderKey, kirimMsg);
+            const balasan = buildMenu(sheets, name);
+            const isNew   = (usage.reset_date !== today) || (tokensHariIni === 0 && !usage.warned);
+            const kirimPesan = isNew ? pesanInfoToken() + '\n' + balasan : balasan;
+            await kirim(senderKey, kirimPesan);
             addHistory(senderKey, 'assistant', balasan);
-            await addTokenUsage(senderKey, estimasiToken(kirimMsg));
+            await addTokenUsage(senderKey, estimasiToken(kirimPesan));
             return;
         }
 
-        // ── PILIH MENU ANGKA ──
+        // ── 1. PILIH MENU ANGKA ──
         const sheetDipilih = deteksiPilihMenu(message, sheets);
         if (sheetDipilih) {
             const dataBisnis = await getSheetData(config.sheet);
-            const icon       = getIcon(sheetDipilih);
+            const icon = getIcon(sheetDipilih);
+            const role = isAdmin
+                ? 'AKSES: ADMIN. Boleh tampilkan semua data.'
+                : 'AKSES: CUSTOMER. Rahasiakan modal dan gaji.';
             const promptFokus =
 `Anda adalah "Corpo" asisten AI bisnis profesional dan friendly.
 Pengguna memilih menu *${sheetDipilih}* ${icon}.
@@ -786,11 +788,11 @@ FORMAT WAJIB (WhatsApp):
 - Ringkasan di akhir jika relevan
 - DILARANG tabel markdown
 DATA: ${dataBisnis}
-AKSES: ADMIN. Boleh tampilkan semua data.`;
+${role}`;
             const ai = await axios.post('https://api.groq.com/openai/v1/chat/completions',
                 {
-                    model      : 'llama-3.1-8b-instant',
-                    messages   : [
+                    model   : 'llama-3.1-8b-instant',
+                    messages: [
                         { role: 'system', content: promptFokus },
                         { role: 'user',   content: `Tampilkan data ${sheetDipilih}` }
                     ],
@@ -799,10 +801,11 @@ AKSES: ADMIN. Boleh tampilkan semua data.`;
                 },
                 { headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' } }
             );
-            const jawaban      = ai.data.choices[0].message.content;
-            const tokensTotal  = estimasiToken(promptFokus) + estimasiToken(jawaban);
+            const jawaban = ai.data.choices[0].message.content;
+            const tokensRequest  = estimasiToken(promptFokus) + estimasiToken(`Tampilkan data ${sheetDipilih}`);
+            const tokensResponse = estimasiToken(jawaban);
+            const tokensTotal    = tokensRequest + tokensResponse;
             await addTokenUsage(senderKey, tokensTotal);
-
             const usageSetelah = tokensHariIni + tokensTotal;
             let pesanAkhir     = jawaban;
             if (usageSetelah >= TOKEN_WARN_AT && !usage.warned) {
@@ -815,7 +818,7 @@ AKSES: ADMIN. Boleh tampilkan semua data.`;
             return;
         }
 
-        // ── SAPAAN → sambutan sudah daftar ──
+        // ── 2. SAPAAN → tampilkan sambutan sudah daftar ──
         if (isSapaan(message)) {
             const balasan = pesanSambutanSudahDaftar(name);
             await kirim(senderKey, balasan);
@@ -824,36 +827,40 @@ AKSES: ADMIN. Boleh tampilkan semua data.`;
             return;
         }
 
-        // ── CATAT TRANSAKSI ──
-        const transaksi = deteksiTransaksi(message);
-        if (transaksi) {
-            const hasil = await catatTransaksi(config.sheet, {
-                action    : 'catat',
-                sheet     : transaksi.sheet,
-                tipe      : transaksi.tipe,
-                kategori  : 'Umum',
-                keterangan: transaksi.keterangan || message,
-                nominal   : transaksi.nominal
-            });
-            const ikon  = transaksi.tipe === 'Pemasukan' ? '💰' : '💸';
-            const balas = hasil.status === 'ok'
-                ? `╔══════════════════════╗\n║  ✅  BERHASIL DICATAT  ║\n╚══════════════════════╝\n\n${ikon} *${transaksi.tipe}*\n──────────────────────\n💵 *Nominal    :* Rp ${transaksi.nominal.toLocaleString('id-ID')}\n📝 *Keterangan :* ${transaksi.keterangan||'-'}\n📅 *Waktu      :* ${new Date().toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})}\n──────────────────────\n📊 Data sudah masuk ke spreadsheet Bos!`
-                : `⚠️ Gagal catat: ${hasil.pesan}`;
-            await kirim(senderKey, balas);
-            addHistory(senderKey, 'assistant', balas);
-            return;
+        // ── 3. CATAT TRANSAKSI (admin only) ──
+        if (isAdmin) {
+            const transaksi = deteksiTransaksi(message);
+            if (transaksi) {
+                const hasil = await catatTransaksi(config.sheet, {
+                    action     : 'catat',
+                    sheet      : transaksi.sheet,
+                    tipe       : transaksi.tipe,
+                    kategori   : 'Umum',
+                    keterangan : transaksi.keterangan || message,
+                    nominal    : transaksi.nominal
+                });
+                const ikon  = transaksi.tipe === 'Pemasukan' ? '💰' : '💸';
+                const balas = hasil.status === 'ok'
+                    ? `╔══════════════════════╗\n║  ✅  BERHASIL DICATAT  ║\n╚══════════════════════╝\n\n${ikon} *${transaksi.tipe}*\n──────────────────────\n💵 *Nominal    :* Rp ${transaksi.nominal.toLocaleString('id-ID')}\n📝 *Keterangan :* ${transaksi.keterangan||'-'}\n📅 *Waktu      :* ${new Date().toLocaleString('id-ID',{dateStyle:'medium',timeStyle:'short'})}\n──────────────────────\n📊 Data sudah masuk ke spreadsheet Bos!`
+                    : `⚠️ Gagal catat: ${hasil.pesan}`;
+                await kirim(senderKey, balas);
+                addHistory(senderKey, 'assistant', balas);
+                return;
+            }
         }
 
-        // ── CHAT UMUM → AI ──
-        const dataBisnis  = await getSheetData(config.sheet);
+        // ── 4. CHAT UMUM → AI ──
+        const dataBisnis = await getSheetData(config.sheet);
+        const role = isAdmin
+            ? 'AKSES: ADMIN. Boleh tampilkan semua data.'
+            : 'AKSES: CUSTOMER. Rahasiakan modal dan gaji.';
         const systemPrompt =
 `Anda adalah "Corpo" (Corpomind), asisten AI bisnis cerdas dan friendly. Panggil pengguna "Bos".
 KEPRIBADIAN: Profesional, santai, hangat, sedikit humoris.
 ATURAN: Jawab sesuai yang ditanya saja. Tanya dulu jika kurang detail. Beritahu sopan jika data tidak ada.
 FORMAT (WhatsApp): Header+icon, garis ──────, field pakai icon+*label* tebal, pisah entri ─ ─ ─, DILARANG tabel markdown.
 DATA: ${dataBisnis}
-AKSES: ADMIN. Boleh tampilkan semua data.`;
-
+${role}`;
         addHistory(senderKey, 'user', message);
         const messages = [
             { role: 'system', content: systemPrompt },
@@ -863,13 +870,19 @@ AKSES: ADMIN. Boleh tampilkan semua data.`;
             }))
         ];
         const ai = await axios.post('https://api.groq.com/openai/v1/chat/completions',
-            { model: 'llama-3.1-8b-instant', messages, max_tokens: 1024, temperature: 0.7 },
+            {
+                model   : 'llama-3.1-8b-instant',
+                messages,
+                max_tokens : 1024,
+                temperature: 0.7
+            },
             { headers: { Authorization: `Bearer ${GROQ_KEY}`, 'Content-Type': 'application/json' } }
         );
-        const jawaban      = ai.data.choices[0].message.content;
-        const tokensTotal2 = messages.reduce((acc, m) => acc + estimasiToken(typeof m.content === 'string' ? m.content : ''), 0) + estimasiToken(jawaban);
+        const jawaban = ai.data.choices[0].message.content;
+        const tokensRequest2  = messages.reduce((acc, m) => acc + estimasiToken(typeof m.content === 'string' ? m.content : ''), 0);
+        const tokensResponse2 = estimasiToken(jawaban);
+        const tokensTotal2    = tokensRequest2 + tokensResponse2;
         await addTokenUsage(senderKey, tokensTotal2);
-
         const usageSetelah2 = tokensHariIni + tokensTotal2;
         let pesanAkhir2     = jawaban;
         if (usageSetelah2 >= TOKEN_WARN_AT && !usage.warned) {
